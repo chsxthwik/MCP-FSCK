@@ -1,0 +1,52 @@
+{
+  "name": "mcp-fsck",
+  "version": "0.1.0",
+  "description": "Integrity check for MCP server configs — audits Claude, Cursor, VS Code and Windsurf agent configurations for secrets, injection-prone args, tool poisoning and dangerous capability combinations.",
+  "type": "module",
+  "license": "MIT",
+  "author": "mcp-fsck contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YOUR_GITHUB_USERNAME/mcp-fsck.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "security",
+    "audit",
+    "scanner",
+    "tool-poisoning",
+    "prompt-injection",
+    "claude",
+    "cursor",
+    "ai-agents"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "mcp-fsck": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+  },
+  "dependencies": {
+    "commander": "^14.0.0",
+    "picocolors": "^1.1.1",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
