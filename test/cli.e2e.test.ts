@@ -13,8 +13,14 @@ const FAKE_SERVER = join(ROOT, "test", "fixtures", "fake-mcp-server.mjs");
 
 const distExists = existsSync(CLI);
 
+/** CI runners set CI=true, which forces ANSI colors on even for piped output. */
+function stripAnsi(text: string): string {
+  return text.replace(/\u001B\[[0-9;]*[a-zA-Z]/g, "");
+}
+
 function run(args: string[], timeout = 30_000) {
-  return spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8", timeout });
+  const proc = spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8", timeout });
+  return { ...proc, stdout: stripAnsi(proc.stdout ?? ""), stderr: stripAnsi(proc.stderr ?? "") };
 }
 
 describe("mcp-fsck CLI (end-to-end against dist/cli.js)", () => {
