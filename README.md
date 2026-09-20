@@ -13,38 +13,61 @@
 
 ---
 
-Your AI agent's MCP config is a list of programs that run automatically with your user's
-permissions — reading files, executing commands, holding API keys. Nobody audits it.
-`mcp-fsck` does:
+Your agent's MCP config is a list of programs that auto-run with your user's
+permissions — reading files, executing commands, holding API keys. `mcp-fsck`
+audits those configs before any of it runs:
 
 ```bash
 npx mcp-fsck
 ```
 
-It finds every MCP config on your machine (Claude Desktop, Claude Code, Cursor,
-VS Code, Windsurf, Zed, Gemini CLI, Codex CLI, Junie, Cline/Roo/Kilo Code),
-parses each server definition — JSONC and Codex's TOML alike — and reports what
-an attacker or a malicious server could do with it, in a risk-graded,
-CI-friendly report.
+## Usage
 
-## What it catches
+```bash
+mcp-fsck                    # scan every discovered config (static analysis only)
+mcp-fsck --deep             # also handshake with each server, audit live tool metadata
+mcp-fsck scan ./mcp.json    # scan specific files (JSONC or Codex config.toml)
+mcp-fsck list               # show discovered configs and the servers they define
+mcp-fsck rules              # print the rule table
+```
 
-**From static config analysis** (no servers executed):
+Each server gets a grade (A–F; one critical finding is an automatic F), each
+finding ships with redacted evidence and a concrete remediation, and the summary
+line counts findings by severity. Clean scans exit `0`; findings at or above
+`--fail-on` exit `1`.
+
+| Flag | Effect |
+|---|---|
+| `--deep` | enumerate tools from running servers (see safety notes) |
+| `--json` | machine-readable output; credential-shaped values redacted |
+| `--fail-on <sev>` | exit `1` when findings ≥ severity (default `high`; `none` to disable) |
+| `--timeout <ms>` | per-server deep-mode timeout (default `10000`) |
+
+### In CI
+
+```yaml
+- name: Audit MCP configs
+  run: npx mcp-fsck --json --fail-on high
+```
+
+## What it audits
+
+**Static analysis** — no servers executed:
 
 | Rule | Severity | Detects |
 |---|---|---|
-| `MCP001` secrets-in-config | high | API keys, tokens, private key material in plaintext configs — including keys passed as CLI args or embedded in URLs |
-| `MCP002` shell-metachar-execution | critical/medium | `sh -c`, pipes-to-shell, command substitution, base64 decoding, command strings routed through `npx -c`/`cmd /c`/shells |
+| `MCP001` secrets-in-config | high | API keys, tokens and private key material in plaintext configs — including credentials passed as CLI args or embedded in URLs |
+| `MCP002` shell-metachar-execution | critical/medium | `sh -c`/`cmd /c`/`npx -c` command strings, pipes-to-shell, command substitution, runtime base64 decoding |
 | `MCP003` inline-code-execution | medium | interpreters invoked with `-e`/`-c` instead of reviewed files |
-| `MCP004` auto-install-unpinned-package | medium | `npx -y pkg`, `bunx`, `pnpm dlx`, `uvx` re-resolving code at every startup — including `@latest`/range tags that look pinned but aren't (the *MCP rug pull*) |
+| `MCP004` auto-install-unpinned-package | medium | `npx -y`, `bunx`, `pnpm dlx`, `npm exec`, `uvx` re-resolving code at every startup — including `@latest`/range tags that look pinned but aren't (the *MCP rug pull*) |
 | `MCP005` unverified-publisher | info | packages not from a known official MCP publisher |
 | `MCP006` insecure-transport | high | remote MCP servers over plain HTTP |
 | `MCP007` remote-credentials-in-config | medium | bearer tokens / API keys in headers |
-| `MCP008` broad-filesystem-scope | high | filesystem servers granted `/` or your whole home directory |
+| `MCP008` broad-filesystem-scope | high | filesystem servers granted `/`, `~`, `.` or your whole home directory |
 | `MCP009` world-writable-config | high | configs other local users can modify to re-tool your agent |
 | `MCP010` config-drift | low | the same server name defined with different code across clients |
 
-**With `--deep`** (opt-in; handshakes with each server via `initialize` + `tools/list` — never executes tools):
+**With `--deep`** — handshakes each server via `initialize` + `tools/list`, never executes tools:
 
 | Rule | Severity | Detects |
 |---|---|---|
@@ -52,15 +75,15 @@ CI-friendly report.
 | `MCP012` tool-shadowing | medium | descriptions that reference other servers' tools to hijack tool selection |
 | `MCP013` dangerous-capability-combo | critical/high | one server holding exec + network, secrets + network, fs-read + network… |
 
-Every server gets a letter grade; every finding gets evidence (secrets redacted) and a remediation.
+Example output:
 
 ```text
-  mcp-fsck v0.1.0 — integrity check for MCP server configs
+  mcp-fsck v0.2.0 — integrity check for MCP server configs
   scanned 1 config file · 4 servers · 9 findings (1 critical, 4 high, 4 medium)
 
-  explicit /tmp/demo/config.json
+  ~/.claude.json
     filesystem (npx)  grade D (score 35, 2 findings)
-    HIGH [MCP008] broad-filesystem-scope
+     HIGH  [MCP008] broad-filesystem-scope
         Filesystem server granted root-level scope
         …
     sketchy-updater (sh)  grade F (score 75, 3 findings)
@@ -70,67 +93,38 @@ Every server gets a letter grade; every finding gets evidence (secrets redacted)
         → Run the underlying binary directly instead of routing through a shell …
 ```
 
-## Install & use
+## Supported clients
 
-```bash
-npm install -g mcp-fsck     # or just: npx mcp-fsck
-```
-
-```bash
-mcp-fsck                    # scan every discovered config (static rules)
-mcp-fsck --deep             # also handshake with servers and audit their live tool metadata
-mcp-fsck scan ./mcp.json    # scan specific config files (JSONC or Codex config.toml)
-mcp-fsck list               # show discovered configs and the servers they define
-mcp-fsck rules              # print the rule table
-```
-
-Read the report top to bottom: each server gets a grade (A–F; any critical
-finding is an F), each finding shows redacted evidence plus a concrete
-remediation, and the summary line counts findings by severity. A clean scan
-exits `0`; findings at or above `--fail-on` exit `1`.
-
-A typical clean result on a pinned, reviewable config:
-
-```text
-  clean (node)  grade A (score 0, 0 findings)
-      ✓ no findings
-```
-
-Key flags:
-
-| Flag | Effect |
+| Client | Config locations scanned |
 |---|---|
-| `--deep` | enumerate tools from running servers (see safety notes) |
-| `--json` | machine-readable output; credential-shaped values redacted |
-| `--fail-on <sev>` | exit `1` when findings ≥ severity (default `high`; `none` to disable) |
-| `--timeout <ms>` | per-server deep-mode timeout (default 10000) |
+| Claude Desktop | `claude_desktop_config.json` (per-OS app dir) |
+| Claude Code | `~/.claude.json`, project `.mcp.json` |
+| Cursor | `~/.cursor/mcp.json`, project `.cursor/mcp.json` |
+| VS Code / VSCodium / Insiders | `User/mcp.json`, project `.vscode/mcp.json` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` |
+| Cline / Roo Code / Kilo Code | editor `globalStorage/*/settings/*mcp_settings.json` |
+| Zed | `~/.config/zed/settings.json` (`context_servers`) |
+| Gemini CLI | `~/.gemini/settings.json`, project `.gemini/settings.json` |
+| Codex CLI | `~/.codex/config.toml`, project `.codex/config.toml` (TOML) |
+| JetBrains Junie | `~/.junie/mcp/mcp.json` |
 
-### CI usage
-
-```yaml
-- name: Audit MCP configs
-  run: npx mcp-fsck --json --fail-on high
-```
+Configs are parsed tolerantly — JSONC comments/trailing commas, non-string
+args and env values, and TOML for Codex — so real-world files never silently
+scan as empty.
 
 ## Deep mode — what it does and doesn't do
 
-`--deep` speaks just enough MCP to call `initialize` and `tools/list`. It **never invokes
-any tool**, runs servers with a minimal environment (only `PATH`/`HOME`/locale plus the
-env the config itself declares), and kills non-responders at the timeout.
+`--deep` speaks just enough MCP to call `initialize` and `tools/list`. It
+**never invokes any tool**, runs servers with a minimal environment (only
+`PATH`/`HOME`/locale plus the env the config itself declares), and kills
+non-responders at the timeout.
 
-It does, however, *start the server processes* — which for `npx`-style entries may download
-packages. Only use `--deep` on configs you control, and treat it like you'd treat `npm install`:
-a deliberate action, not a background default. Static mode is always safe.
+It does *start the server processes* — which for `npx`-style entries may
+download packages. Only use `--deep` on configs you control, and treat it like
+you'd treat `npm install`: a deliberate action, not a background default.
+Static mode is always safe.
 
-## Why
-
-MCP servers arrive from blog posts and package registries, get broad permissions by default,
-and are stored in plaintext JSON files that sync to dotfile repos and backups. The attack
-surface is real: tool poisoning, rug pulls, typosquatted servers, and configs that quietly
-grant `/` to a filesystem server. `mcp-fsck` is the boring, offline check you run before
-trusting any of it — and in CI so it stays trusted.
-
-### How it compares
+## How it compares
 
 | | mcp-fsck | mcp-scan (Snyk) | mcp-audit (Rust) |
 |---|---|---|---|
@@ -138,17 +132,20 @@ trusting any of it — and in CI so it stays trusted.
 | Live tool enumeration + poisoning analysis | ✅ | ✅ | — |
 | Per-server grades + CI exit codes | ✅ | — | ✅ |
 | Cross-client drift detection | ✅ | — | — |
+| Clients covered | 10+ clients incl. Codex/Zed/Cline | fewer | fewer |
 | Runs fully offline (static mode) | ✅ | — | ✅ |
 
-Different tools, different tradeoffs — run the one that fits. `mcp-fsck` aims to be the
-fast, dependency-light local check with a report your whole team can act on.
+Different tools, different tradeoffs — run the one that fits. `mcp-fsck` aims
+to be the fast, dependency-light local check with a report your whole team can
+act on.
 
 ## Threat model & limits
 
-`mcp-fsck` is a linter, not a sandbox. It reads configs and (opt-in) tool metadata;
-it cannot verify what compiled code actually does, and static heuristics can miss
-clever obfuscation or flag odd-but-benign setups (that's why `MCP005` is `info`).
-Findings are decision support — the judgment call stays with you.
+`mcp-fsck` is a linter, not a sandbox. It reads configs and (opt-in) tool
+metadata; it cannot verify what compiled code actually does, and static
+heuristics can miss clever obfuscation or flag odd-but-benign setups (that's
+why `MCP005` is `info`). Findings are decision support — the judgment call
+stays with you.
 
 ## Development
 
@@ -159,11 +156,13 @@ npm test             # vitest — unit + live-handshake + CLI e2e tests
 npm run typecheck
 ```
 
-The test suite includes a fake MCP server (`test/fixtures/fake-mcp-server.mjs`) so the
-deep-mode client and detection rules are tested against a real JSON-RPC handshake.
+The test suite includes a fake MCP server (`test/fixtures/fake-mcp-server.mjs`)
+so the deep-mode client and detection rules are tested against a real JSON-RPC
+handshake.
 
-Contributions welcome: new rules, new client config formats, better heuristics.
-Open an issue with a **redacted** config snippet before pasting anything sensitive.
+Contributions welcome: new rules, new client config formats, better
+heuristics. Open an issue with a **redacted** config snippet before pasting
+anything sensitive.
 
 ## License
 
