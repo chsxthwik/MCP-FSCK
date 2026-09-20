@@ -143,11 +143,41 @@ function enumerateStdio(server: ParsedServer, timeoutMs: number): Promise<DeepRe
   });
 }
 
+/**
+ * Effective request headers. Codex configs reference credentials
+ * indirectly — `bearer_token_env_var` names an env var holding the token,
+ * `env_http_headers` maps header names to env var names — so resolve them
+ * here, at request time. Keeping resolved values out of `server.headers`
+ * matters: static rules would otherwise report an env-var reference (the
+ * recommended practice) as a stored credential.
+ */
+export function resolvedHeaders(server: ParsedServer): Record<string, string> {
+  const headers: Record<string, string> = { ...(server.headers ?? {}) };
+  const raw = server.raw;
+  if (raw === null || typeof raw !== "object") return headers;
+  const r = raw as Record<string, unknown>;
+  const envHeaders = r["env_http_headers"];
+  if (envHeaders !== null && typeof envHeaders === "object") {
+    for (const [name, envVar] of Object.entries(envHeaders as Record<string, unknown>)) {
+      if (typeof envVar !== "string") continue;
+      const value = process.env[envVar];
+      if (value !== undefined && value !== "") headers[name] = value;
+    }
+  }
+  const bearerVar = r["bearer_token_env_var"];
+  if (typeof bearerVar === "string" && headers["Authorization"] === undefined) {
+    const token = process.env[bearerVar];
+    if (token !== undefined && token !== "") headers["Authorization"] = `Bearer ${token}`;
+  }
+  return headers;
+}
+
 async function enumerateHttp(server: ParsedServer, timeoutMs: number): Promise<DeepResult> {
   const base: DeepResult = { server: server.name, source: server.source, status: "ok", tools: [] };
   if (server.url === undefined) {
     return { ...base, status: "error", error: "no url defined" };
   }
+  const requestHeaders = resolvedHeaders(server);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -157,7 +187,7 @@ async function enumerateHttp(server: ParsedServer, timeoutMs: number): Promise<D
         headers: {
           "content-type": "application/json",
           accept: "application/json, text/event-stream",
-          ...(server.headers ?? {}),
+          ...requestHeaders,
         },
         body: JSON.stringify(body),
         signal: controller.signal,

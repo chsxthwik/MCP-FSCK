@@ -158,6 +158,8 @@ export function parseConfigContents(path: string, client: string, text: string):
  * Codex CLI's config.toml uses [mcp_servers.<name>] tables:
  *   command = "npx", args = [...], env = {..} / [mcp_servers.<name>.env],
  *   url = "https://…", http_headers / bearer_token_env_var for remotes.
+ * Credential references (bearer_token_env_var, env_http_headers) stay on
+ * `raw` and are resolved by deep mode at request time.
  */
 export function parseCodexContents(path: string, client: string, text: string): ParseOutcome {
   let root: Record<string, unknown>;
@@ -175,6 +177,7 @@ export function parseCodexContents(path: string, client: string, text: string): 
   for (const [name, value] of Object.entries(map as Record<string, unknown>)) {
     if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
     const v = value as Record<string, unknown>;
+    if (v["enabled"] === false) continue;
     const entry = {
       type: typeof v["url"] === "string" ? "http" : "stdio",
       command: typeof v["command"] === "string" ? v["command"] : undefined,

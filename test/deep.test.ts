@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { enumerateTools } from "../src/deep.js";
+import { enumerateTools, resolvedHeaders } from "../src/deep.js";
 import { ALL_RULES } from "../src/rules/index.js";
 import { makeServer } from "./helpers.js";
 import type { RuleContext } from "../src/types.js";
@@ -80,5 +80,36 @@ describe("deep rules against live tool metadata", () => {
     const context = await deepContext([server]);
     const findings = runDeepRules(server, context);
     expect(findings).toHaveLength(0);
+  });
+});
+
+describe("resolvedHeaders", () => {
+  it("resolves Codex env-referenced credentials at request time", () => {
+    process.env.FSCK_TEST_TOKEN = "tok-123";
+    process.env.FSCK_TEST_TENANT = "t-9";
+    const server = makeServer({
+      url: "https://x.example",
+      raw: {
+        url: "https://x.example",
+        bearer_token_env_var: "FSCK_TEST_TOKEN",
+        env_http_headers: { "X-Tenant": "FSCK_TEST_TENANT" },
+      },
+    });
+    const headers = resolvedHeaders(server);
+    expect(headers["Authorization"]).toBe("Bearer tok-123");
+    expect(headers["X-Tenant"]).toBe("t-9");
+    // resolved values stay out of server.headers — static rules must not
+    // mistake an env-var reference for a stored credential
+    expect(server.headers).toBeUndefined();
+  });
+
+  it("omits headers when the referenced env var is unset", () => {
+    const server = makeServer({
+      url: "https://x.example",
+      headers: { "X-Static": "v" },
+      raw: { bearer_token_env_var: "FSCK_DEFINITELY_UNSET_VAR" },
+    });
+    const headers = resolvedHeaders(server);
+    expect(headers).toEqual({ "X-Static": "v" });
   });
 });

@@ -105,6 +105,33 @@ TOKEN = "x"
     expect(servers[0]!.env).toEqual({ TOKEN: "x" });
   });
 
+  it("skips Codex servers with enabled = false", () => {
+    const text = `
+[mcp_servers.off]
+command = "npx"
+enabled = false
+
+[mcp_servers.on]
+command = "node"
+args = ["ok.js"]
+`;
+    const { servers } = parseConfigContents("/x/config.toml", "codex", text);
+    expect(servers.map((s) => s.name)).toEqual(["on"]);
+  });
+
+  it("keeps Codex credential references out of headers", () => {
+    const text = `
+[mcp_servers.remote]
+url = "https://mcp.example.com"
+bearer_token_env_var = "MCP_TOKEN"
+env_http_headers = { X-Tenant = "MCP_TENANT" }
+`;
+    const { servers } = parseConfigContents("/x/config.toml", "codex", text);
+    expect(servers).toHaveLength(1);
+    // references resolve at request time (deep mode), never into headers
+    expect(servers[0]!.headers).toBeUndefined();
+  });
+
   it("reports invalid TOML as an error", () => {
     const { servers, error } = parseConfigContents("/x/config.toml", "codex", "[unterminated");
     expect(servers).toHaveLength(0);

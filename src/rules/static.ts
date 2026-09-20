@@ -113,7 +113,7 @@ function secretsRule(server: ParsedServer): RawFinding[] {
 }
 
 const INLINE_INTERPRETERS: Array<[RegExp, string]> = [
-  [/(^|\/)(node|python3?|perl|ruby|php|lua|tclsh)($|\s)/, "script interpreter"],
+  [/(^|[\\/])(node|python3?|perl|ruby|php|lua|tclsh)(\.exe)?($|\s)/i, "script interpreter"],
 ];
 
 function commandLine(server: ParsedServer): string {
@@ -121,7 +121,7 @@ function commandLine(server: ParsedServer): string {
   return [server.command, ...(server.args ?? [])].join(" ");
 }
 
-const SHELL_WRAPPER = /(^|\/)(sh|bash|zsh|dash|ksh|pwsh|powershell|cmd)(\.exe)?$/;
+const SHELL_WRAPPER = /(^|[\\/])(sh|bash|zsh|dash|ksh|pwsh|powershell|cmd)(\.exe)?$/i;
 const SHELL_CODE_FLAGS = new Set(["-c", "--call", "/c", "-command", "-encodedcommand", "-ec", "-e"]);
 
 /** The argument a shell actually interprets as code (after -c / /c / -Command). */
@@ -301,6 +301,9 @@ function packageToken(server: ParsedServer): { pkg: string; autoInstall: boolean
 }
 
 function isUnpinnedNpm(pkg: string): boolean {
+  // Local refs (file:, link:, workspace:, portal:, patch:) never hit the
+  // registry — nothing re-resolves at startup.
+  if (/^(file|link|workspace|portal|patch):/i.test(pkg)) return false;
   // strip scope, then require the ref after the name to be immutable:
   // an exact semver, a git sha, or a local path. `pkg@latest`, `pkg@^1`,
   // `pkg@*`, `pkg@beta` all re-resolve on every launch — that is unpinned.
@@ -349,6 +352,7 @@ function unverifiedPublisherRule(server: ParsedServer): RawFinding[] {
   if (info === null) return [];
   if (KNOWN_PUBLISHER_PREFIXES.some((p) => info.pkg.startsWith(p))) return [];
   if (info.pkg.startsWith(".") || info.pkg.startsWith("/")) return []; // local path, not a registry package
+  if (/^(file|link|workspace|portal|patch):/i.test(info.pkg)) return []; // local ref, not a registry package
   return [
     {
       title: "Package from an unverified publisher",
