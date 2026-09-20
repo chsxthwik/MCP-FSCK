@@ -40,6 +40,9 @@ line counts findings by severity. Clean scans exit `0`; findings at or above
 |---|---|
 | `--deep` | enumerate tools from running servers (see safety notes) |
 | `--json` | machine-readable output; credential-shaped values redacted |
+| `--sarif <file>` | also write findings as SARIF 2.1.0 for code-scanning upload |
+| `--baseline <file>` | suppression file (auto-loads `.mcp-fsck.json` from the cwd) |
+| `--write-baseline [file]` | record current findings as accepted into a suppression file |
 | `--fail-on <sev>` | exit `1` when findings ≥ severity (default `high`; `none` to disable) |
 | `--timeout <ms>` | per-server deep-mode timeout (default `10000`) |
 
@@ -48,6 +51,30 @@ line counts findings by severity. Clean scans exit `0`; findings at or above
 ```yaml
 - name: Audit MCP configs
   run: npx mcp-fsck --json --fail-on high
+```
+
+Or upload findings to GitHub code scanning via SARIF (this repo's own
+`mcp-fsck.yml` workflow does exactly that):
+
+```yaml
+- run: npx mcp-fsck --sarif results.sarif --fail-on none
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: results.sarif
+```
+
+### Accepting known findings (baseline)
+
+```bash
+mcp-fsck --write-baseline     # freeze current findings into .mcp-fsck.json
+```
+
+Every later scan suppresses those findings (and reports `N suppressed`), so
+`--fail-on` only fires on *new* issues. Hand-edit entries to widen them —
+`server: "*"` matches any server; `source` is a substring of the config path:
+
+```json
+{ "ignore": [{ "rule": "MCP005", "server": "*" }] }
 ```
 
 ## What it audits
@@ -66,6 +93,11 @@ line counts findings by severity. Clean scans exit `0`; findings at or above
 | `MCP008` broad-filesystem-scope | high | filesystem servers granted `/`, `~`, `.` or your whole home directory |
 | `MCP009` world-writable-config | high | configs other local users can modify to re-tool your agent |
 | `MCP010` config-drift | low | the same server name defined with different code across clients |
+| `MCP014` typosquat-lookalike-package | medium | a package reusing an official server's name under a different scope |
+| `MCP015` suspicious-server-name | medium | invisible/non-ASCII characters disguising one server as another |
+| `MCP016` tools-auto-approved | medium/high | `alwaysAllow`/`autoApprove` lists skipping consent prompts (`*` = high) |
+
+Entries marked `enabled = false` / `disabled = true` are skipped entirely.
 
 **With `--deep`** — handshakes each server via `initialize` + `tools/list`, never executes tools:
 

@@ -1,0 +1,33 @@
+name: MCP audit
+
+# Dogfooding: this repo's CI runs mcp-fsck itself — the same `npx mcp-fsck`
+# step users add to their pipelines. Findings land in GitHub code scanning
+# via the SARIF upload below.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run build
+      # the clean example must pass the high-severity gate
+      - run: node dist/cli.js scan examples/clean.mcp.json --fail-on high
+      # the intentionally-risky example exercises findings → SARIF → code scanning
+      - run: node dist/cli.js scan examples/risky.mcp.json --fail-on none --sarif results.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: results.sarif

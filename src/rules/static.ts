@@ -347,6 +347,114 @@ const KNOWN_PUBLISHER_PREFIXES = [
   "@sentry/",
 ];
 
+/** npm spec without its version/ref suffix: "@scope/name@1.2.3" → "@scope/name". */
+function packageName(pkg: string): string {
+  const at = pkg.indexOf("@", 1);
+  return at > 0 ? pkg.slice(0, at) : pkg;
+}
+
+// Official MCP server packages — basename → canonical scoped name. A package
+// reusing the basename under any other scope (or none) is a likely impersonator.
+const OFFICIAL_PACKAGES = [
+  "@modelcontextprotocol/server-filesystem",
+  "@modelcontextprotocol/server-github",
+  "@modelcontextprotocol/server-memory",
+  "@modelcontextprotocol/server-everything",
+  "@modelcontextprotocol/server-fetch",
+  "@modelcontextprotocol/server-puppeteer",
+  "@modelcontextprotocol/server-sqlite",
+  "@modelcontextprotocol/server-postgres",
+  "@modelcontextprotocol/server-brave-search",
+  "@modelcontextprotocol/server-gitlab",
+  "@modelcontextprotocol/server-slack",
+  "@modelcontextprotocol/server-gdrive",
+  "@modelcontextprotocol/server-google-maps",
+  "@modelcontextprotocol/server-aws-kb-retrieval",
+  "@github/github-mcp-server",
+];
+const OFFICIAL_BASENAMES = new Map(OFFICIAL_PACKAGES.map((p) => [p.split("/").pop()!, p]));
+
+function typosquatRule(server: ParsedServer): RawFinding[] {
+  const info = packageToken(server);
+  if (info === null) return [];
+  const name = packageName(info.pkg);
+  const basename = name.split("/").pop() ?? name;
+  const official = OFFICIAL_BASENAMES.get(basename);
+  if (official === undefined || name === official) return [];
+  return [
+    {
+      title: "Package name impersonates an official MCP server",
+      detail: `\`${info.pkg}\` reuses the name of the official server \`${official}\` under a different scope (or none). This is the classic typosquat shape: same tool name, different publisher — your agent will happily run it.`,
+      evidence: `${info.runnerCommand} ${info.pkg}`,
+      severity: "medium",
+      remediation: `If you meant the official server, use \`${official}\`; otherwise verify \`${name}\`'s publisher deliberately.`,
+    },
+  ];
+}
+
+// Zero-width, bidi-override and other invisible codepoints make one name look
+// like another in every UI that lists your servers.
+const INVISIBLE_UNICODE = /[\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u2064\uFEFF]/;
+
+function suspiciousNameRule(server: ParsedServer): RawFinding[] {
+  const name = server.name;
+  if (INVISIBLE_UNICODE.test(name)) {
+    return [
+      {
+        title: "Server name contains invisible unicode",
+        detail: `The name \`${name}\` embeds zero-width or bidirectional-override characters. It renders identically to (or inside) a different name — a server can disguise itself as a trusted one in tool listings.`,
+        evidence: `codepoints: ${[...name].map((c) => `U+${(c.codePointAt(0) ?? 0).toString(16).padStart(4, "0")}`).join(" ")}`,
+        severity: "medium",
+        remediation: "Rename the server to a plain ASCII slug.",
+      },
+    ];
+  }
+  if (/[^\x00-\x7F]/.test(name)) {
+    return [
+      {
+        title: "Non-ASCII characters in server name",
+        detail: `The name \`${name}\` contains non-ASCII characters. Legitimate server names are plain slugs; lookalike unicode (Cyrillic а, Greek ο, …) lets a server impersonate another in tool lists and prompts.`,
+        evidence: JSON.stringify(name),
+        severity: "medium",
+        remediation: "Rename the server to a plain ASCII slug, or verify the unicode is intentional.",
+      },
+    ];
+  }
+  return [];
+}
+
+// Clients that support per-server auto-approval (Cline/Roo `alwaysAllow`,
+// forks' `autoApprove`, snake-case variants) bypass the human-in-the-loop
+// prompt for the listed tools — with no consent gate, a poisoned tool runs
+// silently.
+const AUTO_APPROVE_KEYS = ["alwaysAllow", "autoApprove", "always_allowed", "auto_approve"];
+
+function autoApproveRule(server: ParsedServer): RawFinding[] {
+  const raw = server.raw;
+  if (raw === null || typeof raw !== "object") return [];
+  const record = raw as Record<string, unknown>;
+  const tools: string[] = [];
+  const keys: string[] = [];
+  for (const key of AUTO_APPROVE_KEYS) {
+    const value = record[key];
+    if (!Array.isArray(value) || value.length === 0) continue;
+    keys.push(key);
+    tools.push(...value.filter((t): t is string => typeof t === "string"));
+  }
+  if (tools.length === 0) return [];
+  const wildcard = tools.some((t) => t === "*" || t === "**");
+  const shown = tools.slice(0, 6).join(", ") + (tools.length > 6 ? ", …" : "");
+  return [
+    {
+      title: "Tools auto-approved without consent prompts",
+      detail: `\`${keys.join("/")}\` pre-approves ${tools.length} tool${tools.length === 1 ? "" : "s"} (${shown}) — they execute with no human confirmation. An injected or updated tool with an approved name runs silently.`,
+      evidence: `${server.name}: ${keys.join(", ")} = [${shown}]`,
+      severity: wildcard ? "high" : "medium",
+      remediation: "Remove the auto-approve list, or restrict it to verified read-only tools — never `*`.",
+    },
+  ];
+}
+
 function unverifiedPublisherRule(server: ParsedServer): RawFinding[] {
   const info = packageToken(server);
   if (info === null) return [];
@@ -650,5 +758,38 @@ export const staticRules: Array<{ meta: import("../types.js").RuleMeta; run: imp
       remediation: "Keep one canonical definition per server name.",
     },
     run: configDriftRule,
+  },
+  {
+    meta: {
+      id: "MCP014",
+      name: "typosquat-lookalike-package",
+      severity: "medium",
+      scope: "static",
+      description: "Detects packages reusing an official MCP server's name under a different scope or no scope.",
+      remediation: "Verify the publisher; prefer the official package name.",
+    },
+    run: typosquatRule,
+  },
+  {
+    meta: {
+      id: "MCP015",
+      name: "suspicious-server-name",
+      severity: "medium",
+      scope: "static",
+      description: "Detects invisible or non-ASCII characters in server names that can disguise one server as another.",
+      remediation: "Use plain ASCII server names.",
+    },
+    run: suspiciousNameRule,
+  },
+  {
+    meta: {
+      id: "MCP016",
+      name: "tools-auto-approved",
+      severity: "medium",
+      scope: "static",
+      description: "Detects alwaysAllow/autoApprove lists that execute tools without consent prompts.",
+      remediation: "Remove auto-approve entries or restrict them to read-only tools.",
+    },
+    run: autoApproveRule,
   },
 ];

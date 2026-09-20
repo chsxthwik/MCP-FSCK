@@ -1,15 +1,17 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
+import { baselineFrom, loadBaseline, resolveBaselinePath, writeBaseline, DEFAULT_BASELINE_NAME } from "./baseline.js";
 import { discoverConfigs, loadExplicitConfigs } from "./discovery.js";
 import { renderJson, renderTerminal, severityAtLeast } from "./report.js";
 import { ALL_RULES } from "./rules/index.js";
 import { mayContainSecret } from "./rules/static.js";
+import { renderSarif } from "./sarif.js";
 import { scan } from "./scan.js";
 import { worstSeverity } from "./score.js";
 import { redactSecret } from "./util.js";
-import type { ScanOptions, Severity, ConfigFile } from "./types.js";
+import type { ScanOptions, Severity, ConfigFile, IgnoreEntry } from "./types.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")) as { version: string };
@@ -40,7 +42,10 @@ function sanitizeConfigsForJson(configs: ConfigFile[]): ConfigFile[] {
   }));
 }
 
-async function runScan(paths: string[], opts: { deep?: boolean; timeout?: string; json?: boolean; failOn?: string }): Promise<void> {
+async function runScan(
+  paths: string[],
+  opts: { deep?: boolean; timeout?: string; json?: boolean; failOn?: string; sarif?: string; baseline?: string; writeBaseline?: string | boolean },
+): Promise<void> {
   const failOn = (opts.failOn ?? "high") as (typeof FAIL_ON_VALUES)[number];
   if (!FAIL_ON_VALUES.includes(failOn)) {
     console.error(`mcp-fsck: invalid --fail-on value "${failOn}" (expected one of ${FAIL_ON_VALUES.join(", ")})`);
@@ -54,14 +59,40 @@ async function runScan(paths: string[], opts: { deep?: boolean; timeout?: string
     return;
   }
 
+  let baseline: IgnoreEntry[] = [];
+  const baselinePath = resolveBaselinePath(opts.baseline);
+  if (baselinePath !== null) {
+    try {
+      baseline = loadBaseline(baselinePath).ignore;
+    } catch (err) {
+      console.error(`mcp-fsck: cannot load baseline ${baselinePath}: ${(err as Error).message}`);
+      process.exitCode = 2;
+      return;
+    }
+  }
+
   const configs = paths.length > 0 ? loadExplicitConfigs(paths) : discoverConfigs().configs;
-  const options: ScanOptions = { deep: opts.deep === true, timeoutMs };
+  const options: ScanOptions = { deep: opts.deep === true, timeoutMs, baseline };
   const result = await scan(options, configs);
+
+  if (opts.writeBaseline !== undefined) {
+    const target = typeof opts.writeBaseline === "string" ? opts.writeBaseline : DEFAULT_BASELINE_NAME;
+    writeBaseline(target, baselineFrom([...result.findings, ...(result.suppressed ?? [])]));
+    console.log(`Wrote baseline ${target}: ${result.findings.length + (result.suppressed?.length ?? 0)} finding(s) recorded.`);
+    return;
+  }
+
+  if (opts.sarif !== undefined) {
+    writeFileSync(opts.sarif, renderSarif(result, pkg.version));
+  }
 
   if (opts.json === true) {
     console.log(renderJson({ ...result, configs: sanitizeConfigsForJson(result.configs) }, pkg.version));
   } else {
     console.log(renderTerminal(result, pkg.version));
+  }
+  if (opts.sarif !== undefined && opts.json !== true) {
+    console.log(`  SARIF written to ${opts.sarif}`);
   }
 
   if (failOn !== "none") {
@@ -86,6 +117,9 @@ program
   .option("--deep", "enumerate tools from running MCP servers (executes the servers; only audit configs you control)")
   .option("--timeout <ms>", "per-server timeout for deep mode, in milliseconds", "10000")
   .option("--json", "machine-readable JSON output (secrets redacted)", false)
+  .option("--sarif <file>", "also write findings as SARIF 2.1.0 (for codeql-action/upload-sarif)")
+  .option("--baseline <file>", `suppression file (default: ${DEFAULT_BASELINE_NAME} in the working directory)`)
+  .option("--write-baseline [file]", `record current findings as accepted in a suppression file (default: ${DEFAULT_BASELINE_NAME})`)
   .option("--fail-on <severity>", "exit 1 when findings at or above this severity exist", "high")
   .action(runScan);
 

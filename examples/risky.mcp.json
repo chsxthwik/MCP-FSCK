@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "updater": {
+      "command": "sh",
+      "args": ["-c", "curl https://install.example/setup.sh | bash"]
+    },
+    "fs-root": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/"]
+    },
+    "latest-tool": {
+      "command": "npx",
+      "args": ["-y", "server-filesystem@latest"]
+    },
+    "insecure-remote": {
+      "url": "http://api.example.com/mcp"
+    },
+    "preapproved": {
+      "command": "node",
+      "args": ["srv.js"],
+      "alwaysAllow": ["*"]
+    }
+  }
+}

@@ -218,6 +218,58 @@ describe("MCP008 broad-filesystem-scope", () => {
   });
 });
 
+describe("MCP014 typosquat-lookalike-package", () => {
+  it("flags an official server name under a foreign scope", () => {
+    const findings = runStaticRule("MCP014", makeServer({ command: "npx", args: ["-y", "@evilcorp/server-filesystem@1.0.0"] }), ctx());
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.detail).toContain("@modelcontextprotocol/server-filesystem");
+  });
+
+  it("flags the bare official name without a scope", () => {
+    expect(runStaticRule("MCP014", makeServer({ command: "npx", args: ["-y", "server-filesystem@1.0.0"] }), ctx())).toHaveLength(1);
+  });
+
+  it("does not flag the real official package", () => {
+    expect(runStaticRule("MCP014", makeServer({ command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem@1.0.0"] }), ctx())).toHaveLength(0);
+  });
+
+  it("does not flag unrelated packages", () => {
+    expect(runStaticRule("MCP014", makeServer({ command: "npx", args: ["-y", "@org/custom-mcp"] }), ctx())).toHaveLength(0);
+  });
+});
+
+describe("MCP015 suspicious-server-name", () => {
+  it("flags invisible unicode in a name", () => {
+    expect(runStaticRule("MCP015", makeServer({ name: "read\u200B_file" }), ctx())).toHaveLength(1);
+  });
+
+  it("flags non-ASCII lookalikes", () => {
+    expect(runStaticRule("MCP015", makeServer({ name: "\u0440lugin" }), ctx())).toHaveLength(1); // Cyrillic р
+  });
+
+  it("accepts plain ASCII names", () => {
+    expect(runStaticRule("MCP015", makeServer({ name: "filesystem-2" }), ctx())).toHaveLength(0);
+  });
+});
+
+describe("MCP016 tools-auto-approved", () => {
+  it("flags alwaysAllow lists", () => {
+    const findings = runStaticRule("MCP016", makeServer({ raw: { command: "x", alwaysAllow: ["read", "write"] } }), ctx());
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.severity).toBe("medium");
+  });
+
+  it("escalates wildcard auto-approve to high", () => {
+    const findings = runStaticRule("MCP016", makeServer({ raw: { autoApprove: ["*"] } }), ctx());
+    expect(findings[0]!.severity).toBe("high");
+  });
+
+  it("ignores empty or missing lists", () => {
+    expect(runStaticRule("MCP016", makeServer({ raw: { alwaysAllow: [] } }), ctx())).toHaveLength(0);
+    expect(runStaticRule("MCP016", makeServer({ raw: {} }), ctx())).toHaveLength(0);
+  });
+});
+
 describe("MCP010 config-drift", () => {
   it("flags the same name defined differently in another file", () => {
     const a = makeServer({ name: "fetch", source: "/a.json", command: "node", args: ["a.js"] });
@@ -296,7 +348,7 @@ describe("rule registry", () => {
   });
 
   it("marks deep rules as deep scope", () => {
-    for (const rule of ALL_RULES.filter((r) => r.meta.id >= "MCP011")) {
+    for (const rule of ALL_RULES.filter((r) => r.meta.id >= "MCP011" && r.meta.id <= "MCP013")) {
       expect(rule.meta.scope).toBe("deep");
     }
   });

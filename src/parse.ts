@@ -141,6 +141,12 @@ export function parseConfigContents(path: string, client: string, text: string):
 
   const servers: ParsedServer[] = [];
   for (const [name, value] of Object.entries(map as Record<string, unknown>)) {
+    // `enabled = false` (Codex-style) / `disabled = true` (Cline-style) mark
+    // an entry inert — skip it entirely so it is never scanned or launched.
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      const v = value as Record<string, unknown>;
+      if (v["enabled"] === false || v["disabled"] === true) continue;
+    }
     const parsed = serverEntry.safeParse(value);
     if (!parsed.success) {
       // keep scanning siblings; skip entries we cannot make sense of

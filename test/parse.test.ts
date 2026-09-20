@@ -51,6 +51,18 @@ describe("parseConfigContents", () => {
     expect(servers.map((s) => s.name)).toEqual(["ok"]);
   });
 
+  it("skips enabled:false / disabled:true entries in mcpServers", () => {
+    const text = JSON.stringify({
+      mcpServers: {
+        off: { command: "node", disabled: true },
+        off2: { command: "node", enabled: false },
+        on: { command: "node" },
+      },
+    });
+    const { servers } = parseConfigContents("/p", "test", text);
+    expect(servers.map((s) => s.name)).toEqual(["on"]);
+  });
+
   it("coerces non-string args and env values instead of dropping the server", () => {
     const text = JSON.stringify({
       mcpServers: { srv: { command: "node", args: ["server.js", 3000], env: { DEBUG: true, PORT: 8080 } } },

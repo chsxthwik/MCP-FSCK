@@ -83,12 +83,26 @@ export interface ScanOptions {
   deep: boolean;
   /** per-server timeout for deep mode, in milliseconds */
   timeoutMs: number;
+  /** baseline suppressions (.mcp-fsck.json) applied after rules run */
+  baseline?: IgnoreEntry[];
+}
+
+/** One suppression entry in a `.mcp-fsck.json` baseline file. */
+export interface IgnoreEntry {
+  /** exact rule id, e.g. "MCP005" */
+  rule?: string;
+  /** server name, or "*" for any */
+  server?: string;
+  /** substring match against the config file path */
+  source?: string;
 }
 
 export interface ScanSummary {
   configsScanned: number;
   serversFound: number;
   findings: Record<Severity, number>;
+  /** findings suppressed by a baseline file */
+  suppressed: number;
 }
 
 export interface ScanResult {
@@ -97,6 +111,8 @@ export interface ScanResult {
   configs: ConfigFile[];
   deep: DeepResult[];
   findings: Finding[];
+  /** findings suppressed by a baseline file (reported, not counted) */
+  suppressed?: Finding[];
   summary: ScanSummary;
 }
 
