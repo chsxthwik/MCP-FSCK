@@ -22,8 +22,10 @@ npx mcp-fsck
 ```
 
 It finds every MCP config on your machine (Claude Desktop, Claude Code, Cursor,
-VS Code, Windsurf), parses each server definition, and reports what an attacker
-or a malicious server could do with it — in a risk-graded, CI-friendly report.
+VS Code, Windsurf, Zed, Gemini CLI, Codex CLI, Junie, Cline/Roo/Kilo Code),
+parses each server definition — JSONC and Codex's TOML alike — and reports what
+an attacker or a malicious server could do with it, in a risk-graded,
+CI-friendly report.
 
 ## What it catches
 
@@ -31,10 +33,10 @@ or a malicious server could do with it — in a risk-graded, CI-friendly report.
 
 | Rule | Severity | Detects |
 |---|---|---|
-| `MCP001` secrets-in-config | high | API keys, tokens, private key material in plaintext configs |
-| `MCP002` shell-metachar-execution | critical | `sh -c`, pipes-to-shell, command substitution, runtime base64 decoding |
+| `MCP001` secrets-in-config | high | API keys, tokens, private key material in plaintext configs — including keys passed as CLI args or embedded in URLs |
+| `MCP002` shell-metachar-execution | critical/medium | `sh -c`, pipes-to-shell, command substitution, base64 decoding, command strings routed through `npx -c`/`cmd /c`/shells |
 | `MCP003` inline-code-execution | medium | interpreters invoked with `-e`/`-c` instead of reviewed files |
-| `MCP004` auto-install-unpinned-package | medium | `npx -y pkg` re-resolving code at every startup (the *MCP rug pull*) |
+| `MCP004` auto-install-unpinned-package | medium | `npx -y pkg`, `bunx`, `pnpm dlx`, `uvx` re-resolving code at every startup — including `@latest`/range tags that look pinned but aren't (the *MCP rug pull*) |
 | `MCP005` unverified-publisher | info | packages not from a known official MCP publisher |
 | `MCP006` insecure-transport | high | remote MCP servers over plain HTTP |
 | `MCP007` remote-credentials-in-config | medium | bearer tokens / API keys in headers |
@@ -77,9 +79,21 @@ npm install -g mcp-fsck     # or just: npx mcp-fsck
 ```bash
 mcp-fsck                    # scan every discovered config (static rules)
 mcp-fsck --deep             # also handshake with servers and audit their live tool metadata
-mcp-fsck scan ./mcp.json    # scan specific config files
+mcp-fsck scan ./mcp.json    # scan specific config files (JSONC or Codex config.toml)
 mcp-fsck list               # show discovered configs and the servers they define
 mcp-fsck rules              # print the rule table
+```
+
+Read the report top to bottom: each server gets a grade (A–F; any critical
+finding is an F), each finding shows redacted evidence plus a concrete
+remediation, and the summary line counts findings by severity. A clean scan
+exits `0`; findings at or above `--fail-on` exit `1`.
+
+A typical clean result on a pinned, reviewable config:
+
+```text
+  clean (node)  grade A (score 0, 0 findings)
+      ✓ no findings
 ```
 
 Key flags:

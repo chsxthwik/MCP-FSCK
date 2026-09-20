@@ -76,7 +76,7 @@ const program = new Command();
 
 program
   .name("mcp-fsck")
-  .description("Integrity check for MCP server configs: audits Claude, Cursor, VS Code and Windsurf agent configurations for secrets, injection-prone args, tool poisoning and dangerous capability combinations.")
+  .description("Integrity check for MCP server configs: audits Claude, Cursor, VS Code, Windsurf, Zed, Codex, Gemini and JetBrains/Cline/Roo agent configurations for secrets, injection-prone args, tool poisoning and dangerous capability combinations.")
   .version(pkg.version);
 
 program

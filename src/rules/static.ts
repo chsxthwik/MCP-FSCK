@@ -8,13 +8,18 @@ const KNOWN_SECRET_VALUES: Array<[RegExp, string, Severity]> = [
   [/^AKIA[0-9A-Z]{16}$/, "AWS access key id", "high"],
   [/^sk-ant-/, "Anthropic API key", "high"],
   [/^sk-or-v1-/, "OpenRouter API key", "high"],
+  [/^[sr]k_(live|test)_[A-Za-z0-9]{16,}$/, "Stripe secret key", "high"],
   [/^sk-[A-Za-z0-9_-]{20,}$/, "API key (sk-…)", "high"],
-  [/^ghp_[A-Za-z0-9]{36}$|^gho_[A-Za-z0-9]{36}$|^github_pat_[A-Za-z0-9_]{22,}$/, "GitHub token", "high"],
+  [/^(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}$|^github_pat_[A-Za-z0-9_]{22,}$/, "GitHub token", "high"],
   [/^npm_[A-Za-z0-9]{36}$/, "npm publish token", "high"],
-  [/^xox[baprs]-/, "Slack token", "high"],
+  [/^xox[baprs]-|^xapp-[A-Za-z0-9-]+$/, "Slack token", "high"],
   [/^glpat-[A-Za-z0-9_-]{20,}$/, "GitLab personal access token", "high"],
   [/^AIza[0-9A-Za-z_-]{35}$/, "Google API key", "high"],
-  [/^-----BEGIN (RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY/, "private key material", "critical"],
+  [/^lin_api_[A-Za-z0-9]{20,}$/, "Linear API key", "high"],
+  [/^sbp_[a-f0-9]{32,}$/, "Supabase service key", "high"],
+  [/^dop_v1_[a-f0-9]{64}$/, "DigitalOcean token", "high"],
+  [/^eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}$/, "JWT", "medium"],
+  [/^-----BEGIN (RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY( BLOCK)?-----/, "private key material", "critical"],
 ];
 
 const GENERIC_SECRET_KEY =
@@ -58,22 +63,50 @@ function checkSecretValue(where: string, key: string, value: string): RawFinding
 
 function secretsRule(server: ParsedServer): RawFinding[] {
   const findings: RawFinding[] = [];
+  const push = (f: RawFinding | null): boolean => {
+    if (f !== null) findings.push(f);
+    return findings.length >= MAX_SECRET_FINDINGS_PER_SERVER;
+  };
   if (server.env) {
     for (const [key, value] of Object.entries(server.env)) {
-      const f = checkSecretValue("env", key, value);
-      if (f) {
-        findings.push(f);
-        if (findings.length >= MAX_SECRET_FINDINGS_PER_SERVER) return findings;
-      }
+      if (push(checkSecretValue("env", key, value))) return findings;
     }
   }
   if (server.headers) {
     for (const [key, value] of Object.entries(server.headers)) {
-      const f = checkSecretValue("headers", key, value);
-      if (f) {
-        findings.push(f);
-        if (findings.length >= MAX_SECRET_FINDINGS_PER_SERVER) return findings;
+      if (push(checkSecretValue("headers", key, value))) return findings;
+    }
+  }
+  // Credentials passed as CLI args or embedded in the URL are just as exposed
+  // as env vars — they sit in the same plaintext file.
+  for (const arg of server.args ?? []) {
+    for (const [pattern, label, severity] of KNOWN_SECRET_VALUES) {
+      if (pattern.test(arg)) {
+        if (push({
+          title: `${label} passed as a command argument`,
+          detail: `An argument holds a value matching the shape of a ${label}. Command-line credentials leak into the plaintext config and may surface in process listings while the server runs.`,
+          evidence: redactSecret(arg),
+          severity,
+          remediation: "Pass the credential via a secret-manager-backed env reference instead of a literal argument; rotate the exposed value.",
+        })) return findings;
       }
+    }
+  }
+  if (server.url !== undefined) {
+    try {
+      const url = new URL(server.url);
+      const userinfo = url.username !== "" || url.password !== "";
+      if (userinfo) {
+        push({
+          title: "Credentials embedded in server URL",
+          detail: "The server URL carries a username/password. URL userinfo ends up in plaintext configs, logs and error messages.",
+          evidence: `${url.protocol}//${url.username !== "" ? redactSecret(url.username) : ""}:****@${url.host}${url.pathname}`,
+          severity: "high",
+          remediation: "Move the credential to an Authorization header sourced from a secret manager; drop userinfo from the URL.",
+        });
+      }
+    } catch {
+      // unparseable URLs are MCP006's problem
     }
   }
   return findings;
@@ -88,21 +121,64 @@ function commandLine(server: ParsedServer): string {
   return [server.command, ...(server.args ?? [])].join(" ");
 }
 
+const SHELL_WRAPPER = /(^|\/)(sh|bash|zsh|dash|ksh|pwsh|powershell|cmd)(\.exe)?$/;
+const SHELL_CODE_FLAGS = new Set(["-c", "--call", "/c", "-command", "-encodedcommand", "-ec", "-e"]);
+
+/** The argument a shell actually interprets as code (after -c / /c / -Command). */
+function shellCodeArg(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i += 1) {
+    if (SHELL_CODE_FLAGS.has(args[i]!.toLowerCase())) return args[i + 1];
+  }
+  return undefined;
+}
+
 function shellMetacharRule(server: ParsedServer): RawFinding[] {
   if (server.transport !== "stdio" || server.command === undefined) return [];
   const args = server.args ?? [];
   const findings: RawFinding[] = [];
-  const shellWrapper = /(^|\/)(sh|bash|zsh|dash|ksh|pwsh|powershell|cmd)(\.exe)?$/.test(server.command);
+  const base = server.command.split(/[/\\]/).pop()!.toLowerCase();
+  const shellWrapper = SHELL_WRAPPER.test(server.command);
 
-  if (shellWrapper) {
+  // `base64 -d …` invoked as the command itself decodes a hidden payload.
+  const hasDecodeFlag = args.some((a) => /^--?d(ecode)?$/i.test(a) || a === "-D");
+  const decodesViaCommand =
+    ((base === "base64" || base === "b64decode") && hasDecodeFlag) ||
+    (base === "openssl" && hasDecodeFlag && args.some((a) => /^(enc|base64)$/i.test(a)));
+  if (decodesViaCommand) {
+    findings.push({
+      title: "Base64-decoded execution",
+      detail: `The server invokes \`${base}\` with a decode flag at startup — a common way to hide what actually runs.`,
+      evidence: commandLine(server).slice(0, 300),
+      severity: "critical",
+      remediation: "Decode the payload offline to inspect it, then replace the obfuscation with a plain command.",
+    });
+    return findings;
+  }
+
+  // `npx -c "…"` / `npm exec -- -c "…"` run the argument through a shell too.
+  const runnerShell = ["npx", "npx.exe", "npm", "npm.exe", "bunx", "bunx.exe"].includes(base);
+  const wrapperCode = shellWrapper || runnerShell;
+
+  if (wrapperCode) {
+    const code = shellCodeArg(args) ?? (args.length > 0 && shellWrapper ? args.join(" ") : undefined);
     const joined = args.join(" ");
-    if (/[$;&|`><\n]/.test(joined)) {
+    if (code !== undefined && /[$;&|`><\n]|\|\s*(ba)?sh\b|&&|;|\bcurl\b[^\n|]*\||\bwget\b[^\n|]*\||\bbase64\b/.test(code)) {
       findings.push({
         title: "Shell command built with metacharacters",
-        detail: `The server runs \`${server.command}\` with arguments containing shell metacharacters. If any part of the string is attacker-influenced (tool arguments, prompt content, file names), this is a command-injection path into your machine.`,
+        detail: `The server runs \`${server.command}\` with arguments containing shell syntax. If any part of the string is attacker-influenced (tool arguments, prompt content, file names), this is a command-injection path into your machine.`,
         evidence: `${server.command} ${joined}`.slice(0, 300),
         severity: "critical",
         remediation: "Run the underlying binary directly instead of routing through a shell; if a shell is required, pass the payload as an argument, never as a shell-parsed string.",
+      });
+      return findings;
+    }
+    if (code !== undefined) {
+      findings.push({
+        title: "Server routed through a shell wrapper",
+        detail: `The server is launched via \`${server.command}\` — its command string is shell-parsed at every startup. Even without obvious metacharacters, this hides the real program from review and makes later tampering invisible in diffs of the binary it runs.`,
+        evidence: `${server.command} ${joined}`.slice(0, 300),
+        severity: "medium",
+        remediation: "Launch the real binary directly with explicit args; reserve shells for configs you have reviewed line by line.",
       });
       return findings;
     }
@@ -158,35 +234,84 @@ function inlineCodeRule(server: ParsedServer): RawFinding[] {
 
 const PACKAGE_RUNNERS: Record<string, "node" | "python"> = {
   npx: "node",
-  "pnpm": "node",
+  "npx.exe": "node",
+  npm: "node",
+  "npm.exe": "node",
+  pnpm: "node",
   "pnpm.exe": "node",
   bunx: "node",
+  "bunx.exe": "node",
   uvx: "python",
-  "uv": "python",
+  "uvx.exe": "python",
+  uv: "python",
+  "uv.exe": "python",
 };
 
+/** Subcommand words that precede the package spec. */
+const RUNNER_SUBCOMMANDS = new Set(["exec", "x", "dlx", "tool", "run", "add"]);
+
+/** Flags whose next argument is a value, not the package spec. */
+const RUNNER_VALUE_FLAGS = new Set([
+  "--registry", "--cache", "--userconfig", "--prefix", "--cwd", "--workspace", "-w",
+  "--node-arg", "--from", "--with", "--index-url", "--extra-index-url", "--python",
+  "--config", "--tag", "--arch", "--platform", "-c", "--call",
+]);
+
+/** Extract the package spec and whether the runner silently fetches it. */
 function packageToken(server: ParsedServer): { pkg: string; autoInstall: boolean; runner: "node" | "python"; runnerCommand: string } | null {
   if (server.transport !== "stdio" || server.command === undefined) return null;
   const base = server.command.split(/[/\\]/).pop()!.toLowerCase();
-  const args = server.args ?? [];
-  if (base === "npm" || base === "pnpm" || base === "uv") {
-    // npm exec / pnpm dlx / uv tool run forms
-    const hasExec = args.some((a) => ["exec", "dlx", "tool"].includes(a));
-    if (!hasExec) return null;
-  }
   const runnerKind = PACKAGE_RUNNERS[base];
   if (runnerKind === undefined) return null;
+  const args = server.args ?? [];
+
+  // npm/pnpm/uv need an exec-style subcommand to act as a package runner.
+  if (base === "npm" || base === "npm.exe" || base === "pnpm" || base === "pnpm.exe" || base === "uv" || base === "uv.exe") {
+    if (!args.some((a) => RUNNER_SUBCOMMANDS.has(a))) return null;
+  }
+
+  // Which invocations fetch without asking? uvx/uv tool run and pnpm dlx/npm
+  // exec resolve from the registry by default; bunx installs silently; npx
+  // needs -y/--yes to skip its (already fragile) confirmation prompt.
   const autoInstall =
-    runnerKind === "python" || args.some((a) => a === "-y" || a === "--yes");
-  const pkg = args.find((a) => !a.startsWith("-") && !["exec", "dlx", "tool", "run"].includes(a));
+    runnerKind === "python" ||
+    base.startsWith("bunx") ||
+    args.some((a) => a === "-y" || a === "--yes" || a === "dlx") ||
+    ((base === "npm" || base === "npm.exe") && args.some((a) => a === "exec" || a === "x"));
+
+  let pkg: string | undefined;
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i]!;
+    if (a.startsWith("--")) {
+      if (!a.includes("=") && RUNNER_VALUE_FLAGS.has(a)) i += 1; // skip its value
+      continue;
+    }
+    if (a.startsWith("-") && a !== "-") {
+      // bundled short flags: -y is flag-only; -p takes a package spec (do not
+      // skip it — it IS a package), -c's value is a command string (skip).
+      if (a === "-c" || a === "--call") i += 1;
+      continue;
+    }
+    if (RUNNER_SUBCOMMANDS.has(a)) continue;
+    pkg = a;
+    break;
+  }
   if (pkg === undefined) return null;
   return { pkg, autoInstall, runner: runnerKind, runnerCommand: base };
 }
 
 function isUnpinnedNpm(pkg: string): boolean {
-  // strip scope, then require an explicit version after the name
+  // strip scope, then require the ref after the name to be immutable:
+  // an exact semver, a git sha, or a local path. `pkg@latest`, `pkg@^1`,
+  // `pkg@*`, `pkg@beta` all re-resolve on every launch — that is unpinned.
   const withoutScope = pkg.startsWith("@") ? pkg.slice(pkg.indexOf("/") + 1) : pkg;
-  return !/^[^@]+@[^@]+$/.test(withoutScope);
+  const at = withoutScope.lastIndexOf("@");
+  if (at <= 0) return true;
+  const ref = withoutScope.slice(at + 1);
+  if (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(ref)) return false;
+  if (/^(file|link|workspace):/.test(ref)) return false;
+  if (/^[0-9a-f]{7,40}$/i.test(ref)) return false;
+  return true;
 }
 
 function autoInstallRule(server: ParsedServer): RawFinding[] {
@@ -239,9 +364,12 @@ function isLocalHost(url: URL): boolean {
   return (
     url.hostname === "localhost" ||
     url.hostname === "127.0.0.1" ||
+    url.hostname === "0.0.0.0" ||
     url.hostname === "::1" ||
     url.hostname === "[::1]" ||
-    url.hostname.endsWith(".local")
+    url.hostname === "[::]" ||
+    url.hostname.endsWith(".local") ||
+    url.hostname.endsWith(".localhost")
   );
 }
 
@@ -313,24 +441,36 @@ function rootPathArg(server: ParsedServer): string | undefined {
   for (const arg of candidates) {
     const normalized = arg.replace(/\\/g, "/").replace(/\/+$/, "") || "/";
     if (normalized === "/") return arg;
-    if (normalized === "~" || normalized === "$HOME" || normalized === home) return arg;
+    if (
+      normalized === "~" ||
+      normalized === "." ||
+      normalized === "$HOME" ||
+      normalized === "${HOME}" ||
+      /^%USERPROFILE%$/i.test(normalized) ||
+      normalized === home
+    ) {
+      return arg;
+    }
     if (/^[a-zA-Z]:$/.test(normalized) || /^[a-zA-Z]:\/$/.test(normalized)) return arg;
   }
   return undefined;
 }
 
+// `fs` must be a token — a bare substring match flags names like "diffs" or "refs".
+const FILESYSTEM_HINT = /(^|[^a-z0-9])(fs|filesystem|files|file[-_]?system)([^a-z0-9]|$)/i;
+
 function broadFilesystemScopeRule(server: ParsedServer): RawFinding[] {
   const looksFilesystem =
-    /fs|file[-_]?system|filesystem/i.test(server.name) ||
-    (server.command !== undefined && /file[-_]?system/i.test(server.command)) ||
-    (server.args ?? []).some((a) => /file[-_]?system/i.test(a));
+    FILESYSTEM_HINT.test(server.name) ||
+    (server.command !== undefined && FILESYSTEM_HINT.test(server.command)) ||
+    (server.args ?? []).some((a) => FILESYSTEM_HINT.test(a));
   if (!looksFilesystem) return [];
   const root = rootPathArg(server);
   if (root === undefined) return [];
   return [
     {
       title: "Filesystem server granted root-level scope",
-      detail: `The filesystem server is allowed to operate on \`${root}\` — the entire disk or home directory, not a project folder. Combined with any prompt injection, the agent can read or rewrite every file your user can.`,
+      detail: `The filesystem server is allowed to operate on \`${root}\` — the entire disk, home directory or the host app's working directory, not a project folder. Combined with any prompt injection, the agent can read or rewrite every file your user can.`,
       evidence: `${server.name}: allowed root ${root}`,
       severity: "high",
       remediation: "Restrict the server to specific project directories (pass explicit paths instead of `/` or `~`).",

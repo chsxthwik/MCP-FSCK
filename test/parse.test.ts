@@ -50,4 +50,64 @@ describe("parseConfigContents", () => {
     const { servers } = parseConfigContents("/p", "test", text);
     expect(servers.map((s) => s.name)).toEqual(["ok"]);
   });
+
+  it("coerces non-string args and env values instead of dropping the server", () => {
+    const text = JSON.stringify({
+      mcpServers: { srv: { command: "node", args: ["server.js", 3000], env: { DEBUG: true, PORT: 8080 } } },
+    });
+    const { servers } = parseConfigContents("/p", "test", text);
+    expect(servers).toHaveLength(1);
+    expect(servers[0]!.args).toEqual(["server.js", "3000"]);
+    expect(servers[0]!.env).toEqual({ DEBUG: "true", PORT: "8080" });
+  });
+
+  it("parses Zed context_servers entries", () => {
+    const text = JSON.stringify({
+      context_servers: {
+        fs: { command: { path: "npx", args: ["-y", "server-fs"], env: { A: "1" } } },
+        remote: { url: "https://mcp.example.com" },
+        off: { enabled: false, command: { path: "gone" } },
+      },
+    });
+    const { servers } = parseConfigContents("/p", "zed", text);
+    expect(servers).toHaveLength(2);
+    expect(servers[0]).toMatchObject({ name: "fs", command: "npx", args: ["-y", "server-fs"] });
+    expect(servers[1]).toMatchObject({ name: "remote", transport: "http" });
+  });
+
+  it("parses Codex config.toml mcp_servers tables", () => {
+    const text = `
+# comment
+[mcp_servers.docs]
+command = "npx"
+args = ["-y", "@org/mcp-docs@1.2.3"]
+env = { API_KEY = "abc" }
+
+[mcp_servers.remote]
+url = "https://mcp.example.com"
+http_headers = { Authorization = "Bearer tok" }
+`;
+    const { servers, error } = parseConfigContents("/x/config.toml", "codex", text);
+    expect(error).toBeUndefined();
+    expect(servers).toHaveLength(2);
+    expect(servers[0]).toMatchObject({ name: "docs", command: "npx", args: ["-y", "@org/mcp-docs@1.2.3"], env: { API_KEY: "abc" } });
+    expect(servers[1]).toMatchObject({ name: "remote", transport: "http", headers: { Authorization: "Bearer tok" } });
+  });
+
+  it("parses nested [mcp_servers.name.env] tables", () => {
+    const text = `
+[mcp_servers.srv]
+command = "node"
+[mcp_servers.srv.env]
+TOKEN = "x"
+`;
+    const { servers } = parseConfigContents("/x/config.toml", "codex", text);
+    expect(servers[0]!.env).toEqual({ TOKEN: "x" });
+  });
+
+  it("reports invalid TOML as an error", () => {
+    const { servers, error } = parseConfigContents("/x/config.toml", "codex", "[unterminated");
+    expect(servers).toHaveLength(0);
+    expect(error).toContain("TOML");
+  });
 });

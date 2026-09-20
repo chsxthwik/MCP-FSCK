@@ -23,18 +23,31 @@ const KEYWORDS: Record<Capability, string[]> = {
     "post", "remote",
   ],
   "fs-read": [
-    "read", "readfile", "listdir", "list", "ls", "glob", "grep", "search", "cat",
-    "stat", "tree", "find", "open", "directory", "directories",
+    "readfile", "listdir", "readdir", "directory", "directories", "filesystem",
   ],
   "fs-write": [
-    "write", "writefile", "create", "delete", "remove", "move", "rename", "edit",
-    "mkdir", "patch", "append", "truncate", "modify",
+    "writefile", "createfile", "deletefile", "mkdir", "rmdir", "filesystem",
   ],
   secrets: [
     "credential", "credentials", "secret", "secrets", "token", "password", "apikey",
     "api_key", "keychain", "keystore", "ssh", "gpg", "privatekey", "auth", "vault",
   ],
 };
+
+/**
+ * Weak fs keywords — "search", "find", "read", "write" — only count when the
+ * tool also mentions a filesystem anchor. Otherwise `search_issues` or
+ * `read_aloud` look like file access and trigger phantom exfil combos.
+ */
+const FS_WEAK: Record<"fs-read" | "fs-write", string[]> = {
+  "fs-read": ["read", "list", "ls", "glob", "grep", "search", "cat", "stat", "tree", "find", "open", "load", "get"],
+  "fs-write": ["write", "create", "delete", "remove", "move", "rename", "edit", "patch", "append", "truncate", "modify", "save", "update"],
+};
+
+const FS_ANCHORS = new Set([
+  "file", "files", "filename", "filepath", "dir", "directory", "directories",
+  "folder", "path", "paths", "filesystem", "disk", "workspace", "fs",
+]);
 
 function tokenize(text: string): string[] {
   return text
@@ -58,7 +71,10 @@ function scoreCapability(capability: Capability, nameTokens: string[], descToken
   const keywords = KEYWORDS[capability]!.map((kw) => kw.replace(/_/g, ""));
   const nameCandidates = candidates(nameTokens);
   const descCandidates = candidates(descTokens);
-  for (const kw of keywords) {
+  const weak = capability === "fs-read" || capability === "fs-write" ? FS_WEAK[capability] : [];
+  const hasAnchor = [...nameTokens, ...descTokens].some((tok) => FS_ANCHORS.has(tok));
+  const effectiveKeywords = hasAnchor ? [...keywords, ...weak] : keywords;
+  for (const kw of effectiveKeywords) {
     if (nameCandidates.some((tok) => tok === kw)) {
       score += 2;
     }
