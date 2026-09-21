@@ -25,21 +25,53 @@ function claudeDesktopPath(): string {
   return join(homedir(), ".config", "Claude", "claude_desktop_config.json");
 }
 
-function vscodeUserPaths(): string[] {
+function editorConfigDir(editor: string): string {
   const p = platform();
-  const out: string[] = [];
+  if (p === "darwin") {
+    return join(homedir(), "Library", "Application Support", editor, "User");
+  }
+  if (p === "win32") {
+    const appData = process.env.APPDATA ?? join(homedir(), "AppData", "Roaming");
+    return join(appData, editor, "User");
+  }
+  return join(homedir(), ".config", editor, "User");
+}
+
+function vscodeUserPaths(): string[] {
   const variants = ["Code", "Code - OSS", "Code - Insiders", "Cursor", "VSCodium"];
-  for (const v of variants) {
-    if (p === "darwin") {
-      out.push(join(homedir(), "Library", "Application Support", v, "User", "mcp.json"));
-    } else if (p === "win32") {
-      const appData = process.env.APPDATA ?? join(homedir(), "AppData", "Roaming");
-      out.push(join(appData, v, "User", "mcp.json"));
-    } else {
-      out.push(join(homedir(), ".config", v, "User", "mcp.json"));
+  return variants.map((v) => join(editorConfigDir(v), "mcp.json"));
+}
+
+/** Cline / Roo Code / Kilo Code store MCP settings in the editor's globalStorage. */
+function vscodeForkExtensionMcpPaths(): Array<{ client: string; path: string }> {
+  const editors = ["Code", "Code - Insiders", "Cursor", "Windsurf", "VSCodium"];
+  const extensions: Array<[string, string, string]> = [
+    ["cline", "saoudrizwan.claude-dev", "cline_mcp_settings.json"],
+    ["cline", "cline.cline", "cline_mcp_settings.json"],
+    ["roo-code", "rooveterinaryinc.roo-cline", "mcp_settings.json"],
+    ["kilo-code", "kilocode.Kilo-Code", "mcp_settings.json"],
+  ];
+  const out: Array<{ client: string; path: string }> = [];
+  for (const editor of editors) {
+    for (const [client, extId, file] of extensions) {
+      out.push({ client, path: join(editorConfigDir(editor), "globalStorage", extId, "settings", file) });
     }
   }
   return out;
+}
+
+function zedSettingsPaths(): string[] {
+  const p = platform();
+  if (p === "win32") {
+    const appData = process.env.APPDATA ?? join(homedir(), "AppData", "Roaming");
+    return [join(appData, "Zed", "settings.json")];
+  }
+  const xdg = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
+  const paths = [join(xdg, "zed", "settings.json")];
+  if (p === "darwin") {
+    paths.push(join(homedir(), "Library", "Application Support", "Zed", "settings.json"));
+  }
+  return paths;
 }
 
 /**
@@ -57,6 +89,12 @@ export function candidateConfigFiles(cwd: string): Candidate[] {
     { client: "vscode-project", paths: [join(cwd, ".vscode", "mcp.json")] },
     { client: "vscode-user", paths: vscodeUserPaths() },
     { client: "windsurf", paths: [join(home, ".codeium", "windsurf", "mcp_config.json")] },
+    { client: "gemini-cli", paths: [join(home, ".gemini", "settings.json"), join(cwd, ".gemini", "settings.json")] },
+    { client: "codex", paths: [join(home, ".codex", "config.toml"), join(cwd, ".codex", "config.toml")] },
+    { client: "junie", paths: [join(home, ".junie", "mcp", "mcp.json")] },
+    { client: "zed", paths: zedSettingsPaths() },
+    { client: "zed-project", paths: [join(cwd, ".zed", "settings.json")] },
+    ...vscodeForkExtensionMcpPaths().map(({ client, path }) => ({ client, paths: [path] })),
   ];
 }
 

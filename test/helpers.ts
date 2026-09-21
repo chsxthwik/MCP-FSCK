@@ -10,6 +10,7 @@ export function makeServer(overrides: {
   url?: string;
   headers?: Record<string, string>;
   source?: string;
+  raw?: unknown;
 } = {}): ParsedServer {
   const transport = overrides.transport ?? (overrides.url !== undefined ? "http" : "stdio");
   return {
@@ -22,7 +23,7 @@ export function makeServer(overrides: {
     headers: overrides.headers,
     source: overrides.source ?? "/test/config.json",
     client: "test",
-    raw: {},
+    raw: overrides.raw ?? {},
   };
 }
 

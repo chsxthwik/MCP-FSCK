@@ -1,3 +1,4 @@
+import { applyBaseline } from "./baseline.js";
 import { enumerateTools, mapPool } from "./deep.js";
 import { ALL_RULES } from "./rules/index.js";
 import { SEVERITY_ORDER, type ConfigFile, type DeepResult, type Finding, type ParsedServer, type RuleContext, type ScanOptions, type ScanResult } from "./types.js";
@@ -60,19 +61,24 @@ export async function scan(options: ScanOptions, configs: ConfigFile[]): Promise
     return a.ruleId.localeCompare(b.ruleId);
   });
 
+  // ---- baseline suppressions ----------------------------------------
+  const { kept, suppressed } = applyBaseline(findings, options.baseline ?? []);
+
   const summary = {
     configsScanned: configs.filter((c) => c.exists).length,
     serversFound: allServers.length,
     findings: { critical: 0, high: 0, medium: 0, low: 0, info: 0 },
+    suppressed: suppressed.length,
   } satisfies ScanResult["summary"];
-  for (const f of findings) summary.findings[f.severity] += 1;
+  for (const f of kept) summary.findings[f.severity] += 1;
 
   return {
     scannedAt: new Date().toISOString(),
     deepUsed: options.deep,
     configs,
     deep: [...deep.values()],
-    findings,
+    findings: kept,
+    suppressed,
     summary,
   };
 }

@@ -118,7 +118,7 @@ export function renderTerminal(result: ScanResult, version: string): string {
   lines.push("");
   lines.push(`  ${pc.bold("mcp-fsck")} ${pc.dim(`v${version} — integrity check for MCP server configs`)}`);
   lines.push(
-    `  scanned ${s.configsScanned} config file${s.configsScanned === 1 ? "" : "s"} · ${s.serversFound} server${s.serversFound === 1 ? "" : "s"} · ${result.findings.length} finding${result.findings.length === 1 ? "" : "s"}${counts.length > 0 ? ` (${counts})` : ""}`,
+    `  scanned ${s.configsScanned} config file${s.configsScanned === 1 ? "" : "s"} · ${s.serversFound} server${s.serversFound === 1 ? "" : "s"} · ${result.findings.length} finding${result.findings.length === 1 ? "" : "s"}${counts.length > 0 ? ` (${counts})` : ""}${s.suppressed > 0 ? ` · ${s.suppressed} suppressed by baseline` : ""}`,
   );
   if (result.deepUsed) {
     lines.push(`  ${pc.dim("deep mode: live tools/list handshakes were performed (no tools were executed)")}`);

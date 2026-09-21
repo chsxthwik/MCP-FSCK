@@ -1,7 +1,7 @@
 {
   "name": "mcp-fsck",
-  "version": "0.1.0",
-  "description": "Integrity check for MCP server configs — audits Claude, Cursor, VS Code and Windsurf agent configurations for secrets, injection-prone args, tool poisoning and dangerous capability combinations.",
+  "version": "0.2.0",
+  "description": "Integrity check for MCP server configs — audits Claude, Cursor, VS Code, Windsurf, Zed, Codex, Gemini and JetBrains/Cline/Roo agent configurations for secrets, injection-prone args, tool poisoning and dangerous capability combinations.",
   "type": "module",
   "license": "MIT",
   "author": "mcp-fsck contributors",
