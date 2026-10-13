@@ -1,6 +1,6 @@
 import { existsSync, realpathSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir, platform } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parseConfigFile } from "./parse.js";
 import type { ConfigFile } from "./types.js";
 
@@ -94,6 +94,51 @@ function zedSettingsPaths(): string[] {
   return paths;
 }
 
+/** Nearest directory containing a `.git` file or directory, or null when `start` is not in a work tree. */
+export function findGitRoot(start: string): string | null {
+  let current = resolve(start);
+  while (true) {
+    if (existsSync(join(current, ".git"))) return current;
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+/**
+ * Project directories that belong to the same work tree as `start`:
+ * the start directory, then each parent, stopping at the git root.
+ * Outside a work tree this is just `start`, so a scan does not wander into unrelated parents.
+ */
+export function projectSearchDirs(start: string): string[] {
+  const resolved = resolve(start);
+  const root = findGitRoot(resolved);
+  if (root === null) return [resolved];
+  const dirs: string[] = [];
+  let current = resolved;
+  while (true) {
+    dirs.push(current);
+    if (current === root) break;
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return dirs;
+}
+
+/** Project-level MCP configs that live in one directory (not the user-global files). */
+function ancestorProjectCandidates(dir: string): Candidate[] {
+  return [
+    { client: "claude-code-project", paths: [join(dir, ".mcp.json")] },
+    { client: "cursor-project", paths: [join(dir, ".cursor", "mcp.json")] },
+    { client: "vscode-project", paths: [join(dir, ".vscode", "mcp.json")] },
+    { client: "gemini-cli", paths: [join(dir, ".gemini", "settings.json")] },
+    { client: "codex", paths: [join(dir, ".codex", "config.toml")] },
+    { client: "amazon-q-project", paths: [join(dir, ".amazonq", "mcp.json")] },
+    { client: "zed-project", paths: [join(dir, ".zed", "settings.json")] },
+  ];
+}
+
 /**
  * Well-known MCP config locations across supported clients, for the current
  * user and platform, plus project-level configs relative to `cwd`.
@@ -120,35 +165,48 @@ export function candidateConfigFiles(cwd: string): Candidate[] {
   ];
 }
 
+function readConfig(path: string, client: string): ConfigFile {
+  let contents: string | null = null;
+  let error: string | undefined;
+  try {
+    if (!statSync(path).isFile()) {
+      error = "not a regular file";
+    } else {
+      contents = readFileSync(path, "utf8");
+    }
+  } catch (err) {
+    error = `unreadable: ${(err as Error).message}`;
+  }
+  const cfg = parseConfigFile(path, client, contents, true);
+  if (error !== undefined) cfg.error = error;
+  return cfg;
+}
+
 /** Locate and parse every known MCP config that exists on disk. */
 export function discoverConfigs(cwd: string = process.cwd()): DiscoveryResult {
   const configs: ConfigFile[] = [];
   const seen = new Set<string>();
-  for (const candidate of candidateConfigFiles(cwd)) {
-    for (const path of candidate.paths) {
-      if (!existsSync(path)) continue;
-      let key: string;
-      try {
-        key = realpathSync(path);
-      } catch {
-        key = resolve(path);
-      }
-      if (seen.has(key)) continue;
-      seen.add(key);
-      let contents: string | null = null;
-      let error: string | undefined;
-      try {
-        if (!statSync(path).isFile()) {
-          error = "not a regular file";
-        } else {
-          contents = readFileSync(path, "utf8");
-        }
-      } catch (err) {
-        error = `unreadable: ${(err as Error).message}`;
-      }
-      const cfg = parseConfigFile(path, candidate.client, contents, true);
-      if (error !== undefined) cfg.error = error;
-      configs.push(cfg);
+  const consider = (client: string, path: string): void => {
+    if (!existsSync(path)) return;
+    let key: string;
+    try {
+      key = realpathSync(path);
+    } catch {
+      key = resolve(path);
+    }
+    if (seen.has(key)) return;
+    seen.add(key);
+    configs.push(readConfig(path, client));
+  };
+
+  const dirs = projectSearchDirs(cwd);
+  for (const candidate of candidateConfigFiles(dirs[0] ?? resolve(cwd))) {
+    for (const path of candidate.paths) consider(candidate.client, path);
+  }
+  // A scan started in a package subdirectory still sees the repo's project configs.
+  for (const dir of dirs.slice(1)) {
+    for (const candidate of ancestorProjectCandidates(dir)) {
+      for (const path of candidate.paths) consider(candidate.client, path);
     }
   }
   return { configs };
@@ -160,19 +218,6 @@ export function loadExplicitConfigs(paths: string[]): ConfigFile[] {
     if (!existsSync(path)) {
       return { path, client: "explicit", exists: false, servers: [], error: "file not found" } satisfies ConfigFile;
     }
-    let contents: string | null = null;
-    let error: string | undefined;
-    try {
-      if (!statSync(path).isFile()) {
-        error = "not a regular file";
-      } else {
-        contents = readFileSync(path, "utf8");
-      }
-    } catch (err) {
-      error = `unreadable: ${(err as Error).message}`;
-    }
-    const cfg = parseConfigFile(path, "explicit", contents, true);
-    if (error !== undefined) cfg.error = error;
-    return cfg;
+    return readConfig(path, "explicit");
   });
 }
