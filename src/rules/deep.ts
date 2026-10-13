@@ -1,4 +1,5 @@
 import { classifyTool, shortList, type Capability } from "../classify.js";
+import { redactSnippet } from "./static.js";
 import type { DeepTool, ParsedServer, RawFinding, RuleContext } from "../types.js";
 
 /** Phrases that read as instructions to the model rather than documentation for the user. */
@@ -32,6 +33,22 @@ const HIDDEN_UNICODE: Array<[RegExp, string]> = [
 interface ToolContext {
   server: ParsedServer;
   tools: DeepTool[];
+}
+
+function handshakeRule(server: ParsedServer, context: RuleContext): RawFinding[] {
+  const result = context.deep.get(`${server.source}::${server.name}`);
+  if (result === undefined || result.status === "ok") return [];
+  const failed = result.status === "timeout" ? "timed out" : "failed";
+  const reason = result.error === undefined ? "" : `: ${redactSnippet(result.error)}`;
+  return [
+    {
+      title: result.status === "timeout" ? "Live tool list timed out" : "Live tool list did not complete",
+      detail: `Deep mode ${failed} for \`${server.name}\`${reason}. Static checks still ran. Tool-poisoning and capability rules did not, because they need a tools/list result.`,
+      evidence: redactSnippet(result.error ?? result.status),
+      severity: "info",
+      remediation: "Fix the server command, or raise --timeout, then re-run with --deep. Until tools/list succeeds, a green check would only mean the config text looked fine.",
+    },
+  ];
 }
 
 function deepToolsFor(server: ParsedServer, context: RuleContext): ToolContext | null {
@@ -206,5 +223,16 @@ export const deepRules: Array<{ meta: import("../types.js").RuleMeta; run: impor
       remediation: "Split capabilities across least-privilege servers.",
     },
     run: capabilityComboRule,
+  },
+  {
+    meta: {
+      id: "MCP018",
+      name: "deep-handshake-failed",
+      severity: "info",
+      scope: "deep",
+      description: "Reports a --deep tools/list that timed out or failed, so poisoning rules had nothing to inspect.",
+      remediation: "Fix the server or raise --timeout, then re-run with --deep.",
+    },
+    run: handshakeRule,
   },
 ];

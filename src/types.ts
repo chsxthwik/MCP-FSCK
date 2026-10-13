@@ -89,6 +89,8 @@ export interface ScanOptions {
   baseline?: IgnoreEntry[];
   /** version string sent in the MCP initialize handshake */
   clientVersion?: string;
+  /** baseline file that was applied, when one was loaded */
+  baselinePath?: string;
 }
 
 /** One suppression entry in a `.mcp-fsck.json` baseline file. */
@@ -119,6 +121,8 @@ export interface ScanResult {
   suppressed?: Finding[];
   /** rule crashes and deep-mode notes that did not become findings */
   warnings: string[];
+  /** baseline file applied to this scan, when one was loaded */
+  baselinePath?: string;
   summary: ScanSummary;
 }
 
