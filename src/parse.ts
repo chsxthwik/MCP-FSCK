@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { parseTomlSubset } from "./toml.js";
 import { parseTolerantJson } from "./util.js";
-import type { ConfigFile, ParsedServer, Transport } from "./types.js";
+import type { ConfigFile, ParsedServer, SkippedServer, Transport } from "./types.js";
 
 /** Values configs write that are not strings (ports, booleans) still parse. */
 const scalar = z.union([z.string(), z.number(), z.boolean()]).transform((v) => String(v));
@@ -21,6 +21,7 @@ const serverEntry = z
 
 export interface ParseOutcome {
   servers: ParsedServer[];
+  skipped: SkippedServer[];
   error?: string;
 }
 
@@ -46,8 +47,19 @@ function uniqueName(base: string, taken: Set<string>): string {
   return name;
 }
 
+function disabledName(name: string, scopeHint?: string): string {
+  return scopeHint !== undefined ? `${name} @ ${scopeHint}` : name;
+}
+
+function isDisabledEntry(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return record["enabled"] === false || record["disabled"] === true;
+}
+
 function pushNamedServers(
   servers: ParsedServer[],
+  skipped: SkippedServer[],
   taken: Set<string>,
   map: Record<string, unknown>,
   path: string,
@@ -55,9 +67,9 @@ function pushNamedServers(
   scopeHint?: string,
 ): void {
   for (const [name, value] of Object.entries(map)) {
-    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-      const record = value as Record<string, unknown>;
-      if (record["enabled"] === false || record["disabled"] === true) continue;
+    if (isDisabledEntry(value)) {
+      skipped.push({ name: disabledName(name, scopeHint), reason: "disabled" });
+      continue;
     }
     const parsed = serverEntry.safeParse(value);
     if (!parsed.success) continue;
@@ -145,36 +157,42 @@ export function parseConfigContents(path: string, client: string, text: string):
   try {
     root = parseTolerantJson(text);
   } catch (err) {
-    return { servers: [], error: `not valid JSON: ${(err as Error).message}` };
+    return { servers: [], skipped: [], error: `not valid JSON: ${(err as Error).message}` };
   }
   if (root === null || typeof root !== "object" || Array.isArray(root)) {
-    return { servers: [], error: "top level is not a JSON object" };
+    return { servers: [], skipped: [], error: "top level is not a JSON object" };
   }
   const obj = root as Record<string, unknown>;
 
   const zedMap = obj["context_servers"];
   if (zedMap !== null && typeof zedMap === "object" && !Array.isArray(zedMap)) {
     const servers: ParsedServer[] = [];
+    const skipped: SkippedServer[] = [];
     for (const [name, value] of Object.entries(zedMap as Record<string, unknown>)) {
       const entry = zedEntryToEntry(value);
-      if (entry === null || entry === "skip") continue;
+      if (entry === "skip") {
+        skipped.push({ name, reason: "disabled" });
+        continue;
+      }
+      if (entry === null) continue;
       const transport = normalizeTransport(entry);
       if (transport === null) continue;
       servers.push(toServer(name, { ...entry, transport }, path, client, value));
     }
-    return { servers };
+    return { servers, skipped };
   }
 
   const taken = new Set<string>();
   const servers: ParsedServer[] = [];
+  const skipped: SkippedServer[] = [];
   let error: string | undefined;
   const top = (obj["mcpServers"] as unknown) ?? (obj["servers"] as unknown) ?? null;
   if (top !== null) {
     if (typeof top !== "object" || Array.isArray(top)) {
       error = '"mcpServers"/"servers" is not an object';
     } else {
-      // `enabled = false` / `disabled = true` are skipped inside pushNamedServers.
-      pushNamedServers(servers, taken, top as Record<string, unknown>, path, client);
+      // `enabled = false` / `disabled = true` are recorded as skipped, not scanned.
+      pushNamedServers(servers, skipped, taken, top as Record<string, unknown>, path, client);
     }
   }
 
@@ -187,10 +205,10 @@ export function parseConfigContents(path: string, client: string, text: string):
       const nested = (project as Record<string, unknown>)["mcpServers"];
       if (nested === null || typeof nested !== "object" || Array.isArray(nested)) continue;
       const hint = projectPath.split(/[/\\]/).filter(Boolean).pop() ?? "project";
-      pushNamedServers(servers, taken, nested as Record<string, unknown>, path, client, hint);
+      pushNamedServers(servers, skipped, taken, nested as Record<string, unknown>, path, client, hint);
     }
   }
-  return { servers, error };
+  return { servers, skipped, error };
 }
 
 /**
@@ -205,18 +223,22 @@ export function parseCodexContents(path: string, client: string, text: string): 
   try {
     root = parseTomlSubset(text);
   } catch (err) {
-    return { servers: [], error: `not valid TOML: ${(err as Error).message}` };
+    return { servers: [], skipped: [], error: `not valid TOML: ${(err as Error).message}` };
   }
   const map = root["mcp_servers"];
-  if (map === undefined) return { servers: [] };
+  if (map === undefined) return { servers: [], skipped: [] };
   if (map === null || typeof map !== "object" || Array.isArray(map)) {
-    return { servers: [], error: '"mcp_servers" is not a table' };
+    return { servers: [], skipped: [], error: '"mcp_servers" is not a table' };
   }
   const servers: ParsedServer[] = [];
+  const skipped: SkippedServer[] = [];
   for (const [name, value] of Object.entries(map as Record<string, unknown>)) {
     if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
     const v = value as Record<string, unknown>;
-    if (v["enabled"] === false) continue;
+    if (v["enabled"] === false) {
+      skipped.push({ name, reason: "disabled" });
+      continue;
+    }
     const entry = {
       type: typeof v["url"] === "string" ? "http" : "stdio",
       command: typeof v["command"] === "string" ? v["command"] : undefined,
@@ -236,7 +258,7 @@ export function parseCodexContents(path: string, client: string, text: string): 
     if (transport === null) continue;
     servers.push(toServer(name, { ...entry, transport }, path, client, value));
   }
-  return { servers };
+  return { servers, skipped };
 }
 
 export function parseConfigFile(path: string, client: string, contents: string | null, exists = contents !== null): ConfigFile {
@@ -247,5 +269,12 @@ export function parseConfigFile(path: string, client: string, contents: string |
     return { path, client, exists: true, servers: [], error: "unreadable" };
   }
   const outcome = parseConfigContents(path, client, contents);
-  return { path, client, exists: true, servers: outcome.servers, error: outcome.error };
+  return {
+    path,
+    client,
+    exists: true,
+    servers: outcome.servers,
+    ...(outcome.skipped.length > 0 ? { skipped: outcome.skipped } : {}),
+    error: outcome.error,
+  };
 }

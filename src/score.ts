@@ -1,4 +1,4 @@
-import { SEVERITY_ORDER, type Finding, type Severity } from "./types.js";
+import { SEVERITY_ORDER, type Finding, type GradeLetter, type Severity } from "./types.js";
 
 const WEIGHTS: Record<Severity, number> = {
   critical: 40,
@@ -15,7 +15,7 @@ export function riskScore(findings: Finding[]): number {
   return Math.min(100, score);
 }
 
-export function grade(score: number, hasCritical: boolean = false): "A" | "B" | "C" | "D" | "F" {
+export function grade(score: number, hasCritical: boolean = false): GradeLetter {
   if (hasCritical) return "F";
   if (score <= 4) return "A";
   if (score <= 14) return "B";

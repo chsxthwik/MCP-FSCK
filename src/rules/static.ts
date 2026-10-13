@@ -724,24 +724,46 @@ function remoteCredentialsRule(server: ParsedServer): RawFinding[] {
   return findings;
 }
 
+/** Env keys that name a directory the server is allowed to use, not process noise like PATH or HOME. */
+const DIRECTORY_ENV = /(dirs?|director(?:y|ies)|folders?|roots?|scopes?|allows?)/i;
+
+function isRootScope(value: string): boolean {
+  const home = homedir();
+  const normalized = value.replace(/\\/g, "/").replace(/\/+$/, "") || "/";
+  if (normalized === "/") return true;
+  if (
+    normalized === "~" ||
+    normalized === "." ||
+    normalized === "$HOME" ||
+    normalized === "${HOME}" ||
+    /^%USERPROFILE%$/i.test(normalized) ||
+    normalized === home
+  ) {
+    return true;
+  }
+  return /^[a-zA-Z]:$/.test(normalized);
+}
+
 function rootPathArg(server: ParsedServer): string | undefined {
   if (server.transport !== "stdio") return undefined;
-  const home = homedir();
-  const candidates = (server.args ?? []).filter((a) => !a.startsWith("-"));
-  for (const arg of candidates) {
-    const normalized = arg.replace(/\\/g, "/").replace(/\/+$/, "") || "/";
-    if (normalized === "/") return arg;
-    if (
-      normalized === "~" ||
-      normalized === "." ||
-      normalized === "$HOME" ||
-      normalized === "${HOME}" ||
-      /^%USERPROFILE%$/i.test(normalized) ||
-      normalized === home
-    ) {
-      return arg;
+  const candidates: string[] = [];
+  for (const arg of server.args ?? []) {
+    if (arg.startsWith("-")) {
+      // `--root=/` never shows up as its own argv entry.
+      const eq = /^(?:--?[A-Za-z0-9_.-]+)=(.*)$/.exec(arg);
+      if (eq?.[1] !== undefined && eq[1] !== "") candidates.push(eq[1]);
+      continue;
     }
-    if (/^[a-zA-Z]:$/.test(normalized) || /^[a-zA-Z]:\/$/.test(normalized)) return arg;
+    candidates.push(arg);
+  }
+  if (server.cwd !== undefined && server.cwd !== "") candidates.push(server.cwd);
+  if (server.env !== undefined) {
+    for (const [key, value] of Object.entries(server.env)) {
+      if (DIRECTORY_ENV.test(key)) candidates.push(value);
+    }
+  }
+  for (const candidate of candidates) {
+    if (isRootScope(candidate)) return candidate;
   }
   return undefined;
 }
@@ -904,7 +926,7 @@ export const staticRules: Array<{
       name: "broad-filesystem-scope",
       severity: "high",
       scope: "static",
-      description: "Detects filesystem servers allowed to operate on / or the entire home directory.",
+      description: "Detects filesystem servers allowed to operate on / or the entire home directory, including --flag= paths, cwd, and directory env vars.",
       remediation: "Pass explicit project directories instead of root paths.",
     },
     run: broadFilesystemScopeRule,
