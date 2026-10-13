@@ -50,6 +50,8 @@ export interface DeepResult {
   source: string;
   status: "ok" | "error" | "timeout";
   error?: string;
+  /** Set when deep mode deliberately skipped something, such as sending credentials over plain HTTP. */
+  warning?: string;
   tools: DeepTool[];
 }
 
@@ -85,6 +87,8 @@ export interface ScanOptions {
   timeoutMs: number;
   /** baseline suppressions (.mcp-fsck.json) applied after rules run */
   baseline?: IgnoreEntry[];
+  /** version string sent in the MCP initialize handshake */
+  clientVersion?: string;
 }
 
 /** One suppression entry in a `.mcp-fsck.json` baseline file. */
@@ -113,6 +117,8 @@ export interface ScanResult {
   findings: Finding[];
   /** findings suppressed by a baseline file (reported, not counted) */
   suppressed?: Finding[];
+  /** rule crashes and deep-mode notes that did not become findings */
+  warnings: string[];
   summary: ScanSummary;
 }
 
