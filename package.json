@@ -1,6 +1,6 @@
 {
   "name": "mcp-fsck",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Integrity check for MCP server configs — audits Claude, Cursor, VS Code, Windsurf, Zed, Codex, Gemini and JetBrains/Cline/Roo agent configurations for secrets, injection-prone args, tool poisoning and dangerous capability combinations.",
   "type": "module",
   "license": "MIT",
@@ -34,7 +34,7 @@
   ],
   "scripts": {
     "build": "tsup",
-    "test": "vitest run",
+    "test": "npm run build && vitest run",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run typecheck && npm run test && npm run build"
   },

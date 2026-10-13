@@ -341,6 +341,56 @@ describe("util", () => {
   });
 });
 
+describe("MCP001 secrets in flags and bearer headers", () => {
+  it("flags --token=ghp_… and the following --api-key value", () => {
+    const token = `ghp_${"c".repeat(36)}`;
+    const inline = runStaticRule("MCP001", makeServer({ command: "srv", args: [`--token=${token}`] }), ctx());
+    expect(inline).toHaveLength(1);
+    expect(inline[0]!.evidence).not.toContain("c".repeat(20));
+    const split = runStaticRule("MCP001", makeServer({ command: "srv", args: ["--api-key", token] }), ctx());
+    expect(split[0]!.title).toContain("command argument");
+  });
+
+  it("flags a Bearer-wrapped GitHub token once, as MCP001", () => {
+    const server = makeServer({
+      url: "https://x.example",
+      headers: { Authorization: `Bearer ghp_${"d".repeat(36)}` },
+    });
+    expect(runStaticRule("MCP001", server, ctx())).toHaveLength(1);
+    expect(runStaticRule("MCP007", server, ctx())).toHaveLength(0);
+  });
+});
+
+describe("MCP004 local uv run", () => {
+  it("does not treat uv run of a local file as a registry install", () => {
+    expect(runStaticRule("MCP004", makeServer({ command: "uv", args: ["run", "server.py"] }), ctx())).toHaveLength(0);
+    expect(runStaticRule("MCP005", makeServer({ command: "uv", args: ["run", "server.py"] }), ctx())).toHaveLength(0);
+  });
+
+  it("still flags uv tool run and uvx without a pin", () => {
+    expect(runStaticRule("MCP004", makeServer({ command: "uv", args: ["tool", "run", "mcp-server-git"] }), ctx())).toHaveLength(1);
+    expect(runStaticRule("MCP004", makeServer({ command: "uvx", args: ["mcp-server-git"] }), ctx())).toHaveLength(1);
+  });
+});
+
+describe("MCP006 websocket transport", () => {
+  it("flags remote ws:// and accepts wss://", () => {
+    expect(runStaticRule("MCP006", makeServer({ url: "ws://api.example.com/mcp" }), ctx())[0]!.severity).toBe("high");
+    expect(runStaticRule("MCP006", makeServer({ url: "wss://api.example.com/mcp" }), ctx())).toHaveLength(0);
+  });
+});
+
+describe("MCP014 near misses", () => {
+  it("flags a one-character misspelling and a non-ASCII package name", () => {
+    const typo = runStaticRule("MCP014", makeServer({ command: "npx", args: ["-y", "@evil/server-filesytem"] }), ctx());
+    expect(typo).toHaveLength(1);
+    expect(typo[0]!.title).toContain("one edit");
+    expect(typo[0]!.detail).toContain("@modelcontextprotocol/server-filesystem");
+    const unicode = runStaticRule("MCP014", makeServer({ command: "npx", args: ["-y", "@evil/server-f\u0456lesystem"] }), ctx());
+    expect(unicode[0]!.title).toContain("non-ASCII");
+  });
+});
+
 describe("rule registry", () => {
   it("has unique rule ids", () => {
     const ids = ALL_RULES.map((r) => r.meta.id);
@@ -351,5 +401,9 @@ describe("rule registry", () => {
     for (const rule of ALL_RULES.filter((r) => r.meta.id >= "MCP011" && r.meta.id <= "MCP013")) {
       expect(rule.meta.scope).toBe("deep");
     }
+  });
+
+  it("includes the config-parse-error rule", () => {
+    expect(ALL_RULES.some((rule) => rule.meta.id === "MCP017" && rule.meta.severity === "high")).toBe(true);
   });
 });

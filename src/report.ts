@@ -76,6 +76,10 @@ function renderServerFindings(findings: Finding[]): string[] {
   return lines;
 }
 
+function configFindings(config: ConfigFile, findings: Finding[]): Finding[] {
+  return findings.filter((finding) => finding.source === config.path);
+}
+
 function renderConfig(config: ConfigFile, findings: Finding[], indent: string): string[] {
   const lines: string[] = [];
   const header = `${config.client} ${pc.dim(abbreviateHome(config.path))}`;
@@ -83,11 +87,20 @@ function renderConfig(config: ConfigFile, findings: Finding[], indent: string): 
   if (config.error !== undefined) {
     lines.push(`${indent}  ${pc.red("parse error:")} ${config.error}`);
   }
+  const unscoped = findings.filter((finding) => finding.source === config.path && finding.server === undefined);
+  if (unscoped.length > 0) lines.push(...renderServerFindings(unscoped));
   if (config.servers.length === 0) {
-    if (config.exists) lines.push(`${indent}  ${pc.dim("no MCP servers defined")}`);
+    if (config.exists && unscoped.length === 0) lines.push(`${indent}  ${pc.dim("no MCP servers defined")}`);
     return lines;
   }
-  for (const server of config.servers) {
+  const ranked = [...config.servers].sort((a, b) => {
+    const delta =
+      riskScore(findings.filter((finding) => finding.source === config.path && finding.server === b.name)) -
+      riskScore(findings.filter((finding) => finding.source === config.path && finding.server === a.name));
+    if (delta !== 0) return delta;
+    return a.name.localeCompare(b.name);
+  });
+  for (const server of ranked) {
     const serverFindings = findings.filter((f) => f.source === config.path && f.server === server.name);
     const score = riskScore(serverFindings);
     const letter = grade(score, serverFindings.some((f) => f.severity === "critical"));
@@ -117,15 +130,21 @@ export function renderTerminal(result: ScanResult, version: string): string {
 
   lines.push("");
   lines.push(`  ${pc.bold("mcp-fsck")} ${pc.dim(`v${version} — integrity check for MCP server configs`)}`);
+  const scannedConfigsForGrade = result.configs.filter((config) => config.exists);
+  const overall = scannedConfigsForGrade.length === 0
+    ? ""
+    : `${pc.dim("overall grade")} ${gradeColor(grade(riskScore(result.findings), result.findings.some((finding) => finding.severity === "critical")))} · `;
   lines.push(
-    `  scanned ${s.configsScanned} config file${s.configsScanned === 1 ? "" : "s"} · ${s.serversFound} server${s.serversFound === 1 ? "" : "s"} · ${result.findings.length} finding${result.findings.length === 1 ? "" : "s"}${counts.length > 0 ? ` (${counts})` : ""}${s.suppressed > 0 ? ` · ${s.suppressed} suppressed by baseline` : ""}`,
+    `  ${overall}scanned ${s.configsScanned} config file${s.configsScanned === 1 ? "" : "s"} · ${s.serversFound} server${s.serversFound === 1 ? "" : "s"} · ${result.findings.length} finding${result.findings.length === 1 ? "" : "s"}${counts.length > 0 ? ` (${counts})` : ""}${s.suppressed > 0 ? ` · ${s.suppressed} suppressed by baseline` : ""}`,
   );
   if (result.deepUsed) {
     lines.push(`  ${pc.dim("deep mode: live tools/list handshakes were performed (no tools were executed)")}`);
   }
   lines.push("");
 
-  const scannedConfigs = result.configs.filter((c) => c.exists);
+  const scannedConfigs = result.configs
+    .filter((config) => config.exists)
+    .sort((a, b) => riskScore(configFindings(b, result.findings)) - riskScore(configFindings(a, result.findings)) || a.path.localeCompare(b.path));
   if (scannedConfigs.length === 0) {
     lines.push("  No MCP config files found. Pass paths explicitly: `mcp-fsck scan path/to/config.json`");
     lines.push("");
@@ -146,6 +165,12 @@ export function renderTerminal(result: ScanResult, version: string): string {
     lines.push("");
   }
 
+  if (result.warnings.length > 0) {
+    lines.push(`  ${pc.yellow("warnings")}`);
+    for (const warning of result.warnings) lines.push(`    ${pc.dim(`· ${warning}`)}`);
+    lines.push("");
+  }
+
   lines.push(`  ${pc.dim("scanned at")} ${result.scannedAt}`);
   lines.push("");
   return lines.join("\n");
@@ -159,4 +184,3 @@ export function severityAtLeast(severity: Severity, threshold: Severity): boolea
   return SEVERITY_ORDER[severity] >= SEVERITY_ORDER[threshold];
 }
 
-export { SEVERITY_LABEL };
