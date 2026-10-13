@@ -1,6 +1,8 @@
 import pc from "picocolors";
+import { redactText } from "./rules/static.js";
 import { grade, riskScore } from "./score.js";
 import { SEVERITY_ORDER, type ConfigFile, type Finding, type ParsedServer, type ScanResult, type Severity } from "./types.js";
+import { redactUrl } from "./util.js";
 
 const SEVERITY_LABEL: Record<Severity, string> = {
   critical: "CRITICAL",
@@ -57,9 +59,10 @@ function wrap(text: string, width: number, indent: string): string {
 
 function serverLabel(server: ParsedServer): string {
   if (server.transport === "stdio" && server.command !== undefined) {
-    return `${server.name} ${pc.dim(`(${server.command})`)}`;
+    return `${server.name} ${pc.dim(`(${redactText(server.command)})`)}`;
   }
-  return `${server.name} ${pc.dim(`(${server.url ?? "remote"})`)}`;
+  const url = server.url === undefined ? "remote" : redactText(redactUrl(server.url));
+  return `${server.name} ${pc.dim(`(${url})`)}`;
 }
 
 function renderServerFindings(findings: Finding[]): string[] {
@@ -127,6 +130,10 @@ export function renderTerminal(result: ScanResult, version: string): string {
     .filter((c) => c.n > 0)
     .map((c) => `${c.n} ${c.label}`)
     .join(", ");
+  const suppressedBy =
+    s.suppressed > 0
+      ? ` · ${s.suppressed} suppressed by ${result.baselinePath !== undefined ? abbreviateHome(result.baselinePath) : "baseline"}`
+      : "";
 
   lines.push("");
   lines.push(`  ${pc.bold("mcp-fsck")} ${pc.dim(`v${version} — integrity check for MCP server configs`)}`);
@@ -135,7 +142,7 @@ export function renderTerminal(result: ScanResult, version: string): string {
     ? ""
     : `${pc.dim("overall grade")} ${gradeColor(grade(riskScore(result.findings), result.findings.some((finding) => finding.severity === "critical")))} · `;
   lines.push(
-    `  ${overall}scanned ${s.configsScanned} config file${s.configsScanned === 1 ? "" : "s"} · ${s.serversFound} server${s.serversFound === 1 ? "" : "s"} · ${result.findings.length} finding${result.findings.length === 1 ? "" : "s"}${counts.length > 0 ? ` (${counts})` : ""}${s.suppressed > 0 ? ` · ${s.suppressed} suppressed by baseline` : ""}`,
+    `  ${overall}scanned ${s.configsScanned} config file${s.configsScanned === 1 ? "" : "s"} · ${s.serversFound} server${s.serversFound === 1 ? "" : "s"} · ${result.findings.length} finding${result.findings.length === 1 ? "" : "s"}${counts.length > 0 ? ` (${counts})` : ""}${suppressedBy}`,
   );
   if (result.deepUsed) {
     lines.push(`  ${pc.dim("deep mode: live tools/list handshakes were performed (no tools were executed)")}`);
@@ -160,14 +167,14 @@ export function renderTerminal(result: ScanResult, version: string): string {
   if (result.deepUsed && deepProblems.length > 0) {
     lines.push(`  ${pc.dim("servers that could not be enumerated in deep mode:")}`);
     for (const d of deepProblems) {
-      lines.push(`    ${pc.dim(`· ${d.server}: ${d.status}${d.error !== undefined ? ` — ${d.error}` : ""}`)}`);
+      lines.push(`    ${pc.dim(`· ${d.server}: ${d.status}${d.error !== undefined ? ` — ${redactText(d.error)}` : ""}`)}`);
     }
     lines.push("");
   }
 
   if (result.warnings.length > 0) {
     lines.push(`  ${pc.yellow("warnings")}`);
-    for (const warning of result.warnings) lines.push(`    ${pc.dim(`· ${warning}`)}`);
+    for (const warning of result.warnings) lines.push(`    ${pc.dim(`· ${redactText(warning)}`)}`);
     lines.push("");
   }
 

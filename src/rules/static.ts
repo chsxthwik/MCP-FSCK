@@ -1,6 +1,6 @@
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isCredentialHeaderName, isLocalHostname, looksLikePlaceholder, redactSecret } from "../util.js";
+import { isCredentialHeaderName, isLocalHostname, looksLikePlaceholder, redactSecret, redactUrl } from "../util.js";
 import type { ConfigFile, ParsedServer, RawFinding, RuleContext, Severity } from "../types.js";
 
 /** Pattern, human label, default severity, match against the *value*. */
@@ -84,16 +84,50 @@ export function redactKnownSecrets(text: string): string {
   return out;
 }
 
+/** Mask known tokens and credentials embedded in URLs. Does not truncate. */
+export function redactText(text: string): string {
+  const withUrls = text.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s'"]+/gi, (match) => redactUrl(match));
+  return redactKnownSecrets(withUrls);
+}
+
 /** Redact one command argument for machine-readable output. */
 export function redactCommandArg(arg: string): string {
   const eq = /^(--?[A-Za-z0-9_.-]+)=(.*)$/.exec(arg);
   if (eq?.[1] !== undefined && eq[2] !== undefined) {
     const key = eq[1].replace(/^-+/, "");
     if (mayContainSecret(key, eq[2])) {
-      return `${eq[1]}=${hasKnownSecret(eq[2]) ? redactKnownSecrets(eq[2]) : redactSecret(eq[2])}`;
+      return `${eq[1]}=${hasKnownSecret(eq[2]) ? redactText(eq[2]) : redactSecret(eq[2])}`;
     }
   }
-  return redactKnownSecrets(arg);
+  return redactText(arg);
+}
+
+/** Redact argv, including the value that follows a secret flag (`--token <value>`). */
+export function redactArgs(args: string[] | undefined): string[] | undefined {
+  if (args === undefined) return undefined;
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]!;
+    const flag = /^--([A-Za-z0-9_.-]+)$/.exec(arg);
+    const next = args[i + 1];
+    if (flag?.[1] !== undefined && next !== undefined && !next.startsWith("-") && mayContainSecret(flag[1], next)) {
+      out.push(arg);
+      out.push(hasKnownSecret(next) ? redactText(next) : redactSecret(next));
+      i += 1;
+      continue;
+    }
+    out.push(redactCommandArg(arg));
+  }
+  return out;
+}
+
+/** Mask tokens and URL userinfo, then cap the length of a printed snippet. */
+export function redactSnippet(text: string): string {
+  return redactText(text).slice(0, 300);
+}
+
+function displayUrl(raw: string): string {
+  return redactText(redactUrl(raw));
 }
 
 function describeSecret(where: string, key: string, known: KnownSecret): RawFinding {
@@ -181,16 +215,29 @@ function secretsRule(server: ParsedServer): RawFinding[] {
       const url = new URL(server.url);
       const userinfo = url.username !== "" || url.password !== "";
       if (userinfo) {
-        push({
-          title: "Credentials embedded in server URL",
-          detail: "The server URL carries a username/password. URL userinfo ends up in plaintext configs, logs and error messages.",
-          evidence: `${url.protocol}//${url.username !== "" ? redactSecret(url.username) : ""}:****@${url.host}${url.pathname}`,
-          severity: "high",
-          remediation: "Move the credential to an Authorization header sourced from a secret manager; drop userinfo from the URL.",
-        });
+        if (
+          push({
+            title: "Credentials embedded in server URL",
+            detail: "The server URL carries a username/password. URL userinfo ends up in plaintext configs, logs and error messages.",
+            evidence: `${url.protocol}//${url.username !== "" ? redactSecret(url.username) : ""}:****@${url.host}${url.pathname}`,
+            severity: "high",
+            remediation: "Move the credential to an Authorization header sourced from a secret manager; drop userinfo from the URL.",
+          })
+        ) {
+          return findings;
+        }
       }
+      const stripped = new URL(url.href);
+      stripped.username = "";
+      stripped.password = "";
+      for (const [key, value] of stripped.searchParams) {
+        if (push(checkSecretValue("url", key, value))) return findings;
+      }
+      const inPath = matchKnownSecret(`${stripped.pathname}${stripped.hash}`);
+      if (inPath !== null && push(describeSecret("url", "path", inPath))) return findings;
     } catch {
-      // unparseable URLs are MCP006's problem
+      const known = matchKnownSecret(server.url);
+      if (known !== null) push(describeSecret("url", "url", known));
     }
   }
   return findings;
@@ -200,9 +247,10 @@ const INLINE_INTERPRETERS: Array<[RegExp, string]> = [
   [/(^|[\\/])(node|python3?|perl|ruby|php|lua|tclsh)(\.exe)?($|\s)/i, "script interpreter"],
 ];
 
-function commandLine(server: ParsedServer): string {
+function redactedCommandLine(server: ParsedServer): string {
   if (server.transport !== "stdio" || server.command === undefined) return "";
-  return [server.command, ...(server.args ?? [])].join(" ");
+  const args = redactArgs(server.args) ?? [];
+  return redactSnippet([redactKnownSecrets(server.command), ...args].join(" "));
 }
 
 const SHELL_WRAPPER = /(^|[\\/])(sh|bash|zsh|dash|ksh|pwsh|powershell|cmd)(\.exe)?$/i;
@@ -232,7 +280,7 @@ function shellMetacharRule(server: ParsedServer): RawFinding[] {
     findings.push({
       title: "Base64-decoded execution",
       detail: `The server invokes \`${base}\` with a decode flag at startup — a common way to hide what actually runs.`,
-      evidence: commandLine(server).slice(0, 300),
+      evidence: redactedCommandLine(server),
       severity: "critical",
       remediation: "Decode the payload offline to inspect it, then replace the obfuscation with a plain command.",
     });
@@ -245,12 +293,11 @@ function shellMetacharRule(server: ParsedServer): RawFinding[] {
 
   if (wrapperCode) {
     const code = shellCodeArg(args) ?? (args.length > 0 && shellWrapper ? args.join(" ") : undefined);
-    const joined = args.join(" ");
     if (code !== undefined && /[$;&|`><\n]|\|\s*(ba)?sh\b|&&|;|\bcurl\b[^\n|]*\||\bwget\b[^\n|]*\||\bbase64\b/.test(code)) {
       findings.push({
         title: "Shell command built with metacharacters",
         detail: `The server runs \`${server.command}\` with arguments containing shell syntax. If any part of the string is attacker-influenced (tool arguments, prompt content, file names), this is a command-injection path into your machine.`,
-        evidence: `${server.command} ${joined}`.slice(0, 300),
+        evidence: redactedCommandLine(server),
         severity: "critical",
         remediation: "Run the underlying binary directly instead of routing through a shell; if a shell is required, pass the payload as an argument, never as a shell-parsed string.",
       });
@@ -260,7 +307,7 @@ function shellMetacharRule(server: ParsedServer): RawFinding[] {
       findings.push({
         title: "Server routed through a shell wrapper",
         detail: `The server is launched via \`${server.command}\` — its command string is shell-parsed at every startup. Even without obvious metacharacters, this hides the real program from review and makes later tampering invisible in diffs of the binary it runs.`,
-        evidence: `${server.command} ${joined}`.slice(0, 300),
+        evidence: redactedCommandLine(server),
         severity: "medium",
         remediation: "Launch the real binary directly with explicit args; reserve shells for configs you have reviewed line by line.",
       });
@@ -274,7 +321,7 @@ function shellMetacharRule(server: ParsedServer): RawFinding[] {
     findings.push({
       title: "Pipe-to-shell / obfuscated execution pattern",
       detail: "Arguments contain a pipe-to-shell, command substitution or backtick pattern. This is the classic remote-code-execution shape (curl … | sh) and should not appear in an MCP config.",
-      evidence: dangerousArg.slice(0, 300),
+      evidence: redactSnippet(dangerousArg),
       severity: "critical",
       remediation: "Remove the pattern and install the referenced tool properly; audit your machine for compromise if you did not add this yourself.",
     });
@@ -286,7 +333,7 @@ function shellMetacharRule(server: ParsedServer): RawFinding[] {
     findings.push({
       title: "Base64-decoded execution",
       detail: "Arguments decode base64 at runtime — a common way to hide what a server actually executes.",
-      evidence: decodeArg.slice(0, 300),
+      evidence: redactSnippet(decodeArg),
       severity: "critical",
       remediation: "Decode the payload offline to inspect it, then replace the obfuscation with a plain command.",
     });
@@ -305,7 +352,7 @@ function inlineCodeRule(server: ParsedServer): RawFinding[] {
           {
             title: "Inline code execution",
             detail: `The server executes inline code via \`${args[inlineFlagIndex]}\` instead of a reviewed script file. Inline snippets bypass code review and are easy to modify unnoticed.`,
-            evidence: commandLine(server).slice(0, 300),
+            evidence: redactedCommandLine(server),
             severity: "medium",
             remediation: "Point the interpreter at a versioned script file so changes show up in diffs.",
           },
@@ -627,8 +674,8 @@ function insecureTransportRule(server: ParsedServer): RawFinding[] {
     return [
       {
         title: "Unparseable remote URL",
-        detail: `The server URL \`${server.url}\` cannot be parsed.`,
-        evidence: server.url,
+        detail: `The server URL \`${redactSnippet(server.url)}\` cannot be parsed.`,
+        evidence: redactSnippet(server.url),
         severity: "low",
         remediation: "Fix the URL in the config.",
       },
@@ -639,8 +686,8 @@ function insecureTransportRule(server: ParsedServer): RawFinding[] {
       return [
         {
           title: "Remote server over unencrypted local transport",
-          detail: `${url} uses an unencrypted ${url.protocol === "ws:" ? "WebSocket" : "HTTP"} transport. Traffic is not encrypted on the wire, and any local process can impersonate the server.`,
-          evidence: server.url,
+        detail: `${displayUrl(server.url)} uses an unencrypted ${url.protocol === "ws:" ? "WebSocket" : "HTTP"} transport. Traffic is not encrypted on the wire, and any local process can impersonate the server.`,
+        evidence: displayUrl(server.url),
           severity: "low",
           remediation: "Prefer HTTPS unless this is a throwaway local server.",
         },
@@ -649,8 +696,8 @@ function insecureTransportRule(server: ParsedServer): RawFinding[] {
     return [
       {
         title: url.protocol === "ws:" ? "Remote server over plain WebSocket" : "Remote server over plain HTTP",
-        detail: `${url} sends every message — including your prompts, files and any tool results — unencrypted across the network. Interception or tampering (tool-list swapping) is trivial on-path.`,
-        evidence: server.url,
+        detail: `${displayUrl(server.url)} sends every message — including your prompts, files and any tool results — unencrypted across the network. Interception or tampering (tool-list swapping) is trivial on-path.`,
+        evidence: displayUrl(server.url),
         severity: "high",
         remediation: "Use an HTTPS endpoint; only accept plain HTTP for isolated local testing.",
       },
@@ -742,16 +789,6 @@ function worldWritableConfigRule(server: ParsedServer): RawFinding[] {
   ];
 }
 
-/** Mask tokens that look like known secrets before echoing a command line. */
-function safeCommandLine(server: ParsedServer): string {
-  const line = commandLine(server);
-  let out = line;
-  for (const [pattern] of KNOWN_SECRET_VALUES) {
-    out = out.replace(new RegExp(pattern.source, "g"), (m) => redactSecret(m));
-  }
-  return out.slice(0, 300);
-}
-
 function configDriftRule(server: ParsedServer, context: RuleContext): RawFinding[] {
   const twins = context.allServers.filter(
     (s) => s.name === server.name && s.source !== server.source,
@@ -771,7 +808,7 @@ function configDriftRule(server: ParsedServer, context: RuleContext): RawFinding
       detail: `\`${server.name}\` is also defined in ${twin.source} (${twin.client}) with a different ${
         twin.command !== undefined ? "command" : "URL"
       }. Clients will run different code under the same name — a quiet way for a tampered copy to go unnoticed.`,
-      evidence: `here: ${safeCommandLine(server) || (server.url ?? "?")} | there: ${safeCommandLine(twin) || (twin.url ?? "?")}`,
+      evidence: `here: ${redactedCommandLine(server) || displayUrl(server.url ?? "?")} | there: ${redactedCommandLine(twin) || displayUrl(twin.url ?? "?")}`,
       severity: "low",
       remediation: "Keep one canonical definition per server, or make the divergence explicit with distinct names.",
     });
@@ -790,7 +827,7 @@ export const staticRules: Array<{
       name: "secrets-in-config",
       severity: "high",
       scope: "static",
-      description: "Detects API keys, tokens and private key material stored in plaintext in MCP configs.",
+      description: "Detects API keys, tokens and private key material in plaintext configs, including URL query strings and command arguments.",
       remediation: "Move credentials into a secret manager; rotate anything found.",
     },
     run: secretsRule,
