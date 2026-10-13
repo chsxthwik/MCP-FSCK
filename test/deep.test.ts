@@ -76,6 +76,22 @@ describe("deep rules against live tool metadata", () => {
     expect(shadow!.title).toContain("another server");
   });
 
+  it("reports a failed tools/list as info and stays quiet when the handshake succeeds", () => {
+    const server = makeServer({ name: "gone", command: "missing-bin" });
+    const key = `${server.source}::${server.name}`;
+    const failed = runDeepRules(server, {
+      allServers: [server],
+      deep: new Map([[key, { server: server.name, source: server.source, status: "error", error: "spawn ENOENT", tools: [] }]]),
+    });
+    expect(failed.map((finding) => finding.ruleId)).toEqual(["MCP018"]);
+    expect(failed[0]!.severity).toBe("info");
+    const ok = runDeepRules(server, {
+      allServers: [server],
+      deep: new Map([[key, { server: server.name, source: server.source, status: "ok", tools: [] }]]),
+    });
+    expect(ok).toHaveLength(0);
+  });
+
   it("stays quiet for a well-behaved toolset", async () => {
     // a server whose tools have honest, single-capability descriptions
     const server = makeServer({ name: "clean", command: process.execPath, args: [FIXTURE], env: { FAKE_TOOLS: "clean" } });

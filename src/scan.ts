@@ -115,6 +115,7 @@ export async function scan(options: ScanOptions, configs: ConfigFile[]): Promise
     findings: kept,
     suppressed,
     warnings,
+    ...(options.baselinePath !== undefined ? { baselinePath: options.baselinePath } : {}),
     summary,
   };
 }

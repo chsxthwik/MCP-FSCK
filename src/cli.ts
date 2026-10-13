@@ -7,12 +7,12 @@ import { DEFAULT_TIMEOUT_MS } from "./deep.js";
 import { discoverConfigs, loadExplicitConfigs } from "./discovery.js";
 import { renderJson, renderTerminal, severityAtLeast } from "./report.js";
 import { ALL_RULES } from "./rules/index.js";
-import { mayContainSecret, redactCommandArg, redactKnownSecrets } from "./rules/static.js";
+import { mayContainSecret, redactArgs, redactKnownSecrets, redactText } from "./rules/static.js";
 import { renderSarif } from "./sarif.js";
 import { scan } from "./scan.js";
 import { worstSeverity } from "./score.js";
-import { isCredentialHeaderName, looksLikePlaceholder, redactSecret } from "./util.js";
-import type { ScanOptions, Severity, ConfigFile, IgnoreEntry } from "./types.js";
+import { isCredentialHeaderName, looksLikePlaceholder, redactSecret, redactUrl } from "./util.js";
+import type { ScanOptions, ScanResult, Severity, ConfigFile, IgnoreEntry } from "./types.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")) as { version: string };
@@ -35,16 +35,29 @@ function redactRecord(record: Record<string, string> | undefined, header = false
 }
 
 function sanitizeUrl(value: string): string {
-  try {
-    const url = new URL(value);
-    if (url.username !== "" || url.password !== "") {
-      url.username = url.username === "" ? "" : "redacted";
-      url.password = url.password === "" ? "" : "redacted";
-    }
-    return redactKnownSecrets(url.toString());
-  } catch {
-    return redactKnownSecrets(value);
+  return redactText(redactUrl(value));
+}
+
+function serverTarget(server: { transport: string; command?: string; args?: string[]; url?: string }): string {
+  if (server.transport === "stdio") {
+    const command = server.command === undefined ? "" : redactText(server.command);
+    const args = (redactArgs(server.args) ?? []).join(" ");
+    return redactText(`${command} ${args}`.trim()).slice(0, 300);
   }
+  return server.url === undefined ? "" : sanitizeUrl(server.url);
+}
+
+function sanitizeForJson(result: ScanResult): ScanResult {
+  return {
+    ...result,
+    configs: sanitizeConfigsForJson(result.configs),
+    warnings: result.warnings.map((warning) => redactText(warning)),
+    deep: result.deep.map((entry) => ({
+      ...entry,
+      error: entry.error === undefined ? undefined : redactText(entry.error),
+      warning: entry.warning === undefined ? undefined : redactText(entry.warning),
+    })),
+  };
 }
 
 function sanitizeConfigsForJson(configs: ConfigFile[]): ConfigFile[] {
@@ -52,8 +65,8 @@ function sanitizeConfigsForJson(configs: ConfigFile[]): ConfigFile[] {
     ...config,
     servers: config.servers.map((server) => ({
       ...server,
-      command: server.command === undefined ? undefined : redactKnownSecrets(server.command),
-      args: server.args?.map((arg) => redactCommandArg(arg)),
+      command: server.command === undefined ? undefined : redactText(server.command),
+      args: redactArgs(server.args),
       env: redactRecord(server.env),
       headers: redactRecord(server.headers, true),
       url: server.url === undefined ? undefined : sanitizeUrl(server.url),
@@ -98,13 +111,27 @@ async function runScan(
     process.exitCode = 2;
     return;
   }
-  const options: ScanOptions = { deep: opts.deep === true, timeoutMs, baseline, clientVersion: pkg.version };
+  const options: ScanOptions = {
+    deep: opts.deep === true,
+    timeoutMs,
+    baseline,
+    clientVersion: pkg.version,
+    ...(baselinePath !== null ? { baselinePath } : {}),
+  };
   const result = await scan(options, configs);
 
   if (opts.writeBaseline !== undefined) {
     const target = typeof opts.writeBaseline === "string" ? opts.writeBaseline : DEFAULT_BASELINE_NAME;
+    const recorded = result.findings.length + (result.suppressed?.length ?? 0);
     writeBaseline(target, baselineFrom([...result.findings, ...(result.suppressed ?? [])]));
-    console.log(`Wrote baseline ${target}: ${result.findings.length + (result.suppressed?.length ?? 0)} finding(s) recorded.`);
+    const note = `Wrote baseline ${target}: ${recorded} finding(s) recorded.`;
+    if (opts.json === true) {
+      console.log(renderJson(sanitizeForJson(result), pkg.version));
+      console.error(note);
+    } else {
+      console.log(renderTerminal(result, pkg.version));
+      console.log(note);
+    }
     return;
   }
 
@@ -113,7 +140,7 @@ async function runScan(
   }
 
   if (opts.json === true) {
-    console.log(renderJson({ ...result, configs: sanitizeConfigsForJson(result.configs) }, pkg.version));
+    console.log(renderJson(sanitizeForJson(result), pkg.version));
   } else {
     console.log(renderTerminal(result, pkg.version));
   }
@@ -154,18 +181,23 @@ program
 program
   .command("list")
   .description("Show which MCP config files were discovered on this machine and the servers they define.")
-  .action(() => {
-    const { configs } = discoverConfigs();
-    const found = configs.filter((c) => c.exists);
-    if (found.length === 0) {
+  .argument("[paths...]", "explicit config file paths to list instead of auto-discovery")
+  .action((paths: string[]) => {
+    const configs = paths.length > 0 ? loadExplicitConfigs(paths) : discoverConfigs().configs;
+    const missing = configs.filter((config) => !config.exists);
+    if (missing.length > 0) {
+      for (const config of missing) console.error(`mcp-fsck: config not found: ${config.path}`);
+      process.exitCode = 2;
+      return;
+    }
+    if (configs.length === 0) {
       console.log("No MCP config files found.");
       return;
     }
-    for (const config of found) {
+    for (const config of configs) {
       console.log(`${config.client}  ${config.path}${config.error !== undefined ? `  (parse error: ${config.error})` : ""}`);
       for (const server of config.servers) {
-        const target = server.transport === "stdio" ? `${server.command} ${(server.args ?? []).join(" ")}` : server.url ?? "";
-        console.log(`  · ${server.name} (${server.transport}) ${target}`);
+        console.log(`  · ${server.name} (${server.transport}) ${serverTarget(server)}`);
       }
       if (config.servers.length === 0) console.log("  · (no servers defined)");
     }

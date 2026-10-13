@@ -122,3 +122,24 @@ const CREDENTIAL_HEADER = /(authorization|auth|api[-_]?key|apikey|token|secret|p
 export function isCredentialHeaderName(name: string): boolean {
   return CREDENTIAL_HEADER.test(name);
 }
+
+/**
+ * Drop userinfo and credential-shaped query values. Known token shapes that
+ * sit in the path are redacted by the caller.
+ */
+export function redactUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.username !== "") url.username = "redacted";
+    if (url.password !== "") url.password = "redacted";
+    const params = [...url.searchParams.entries()];
+    url.search = "";
+    for (const [key, param] of params) {
+      const sensitive = isCredentialHeaderName(key) && param.length >= 8 && !looksLikePlaceholder(param);
+      url.searchParams.append(key, sensitive ? "redacted" : param);
+    }
+    return url.toString();
+  } catch {
+    return value;
+  }
+}

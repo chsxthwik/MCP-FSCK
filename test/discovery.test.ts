@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { candidateConfigFiles, discoverConfigs, loadExplicitConfigs, mcpJsonUnderUserDir } from "../src/discovery.js";
+import { candidateConfigFiles, discoverConfigs, loadExplicitConfigs, mcpJsonUnderUserDir, projectSearchDirs } from "../src/discovery.js";
 import { scan } from "../src/scan.js";
 
 describe("discovery", () => {
@@ -43,6 +43,22 @@ describe("discovery", () => {
     expect(configs.some((config) => !config.exists)).toBe(false);
     expect(configs.find((config) => config.path === join(dir, ".mcp.json"))?.servers.map((server) => server.name)).toEqual(["local"]);
     expect(configs.find((config) => config.path === join(dir, ".amazonq", "mcp.json"))?.servers.map((server) => server.name)).toEqual(["q"]);
+  });
+
+  it("scans project configs up through the git root and not above it", () => {
+    const top = mkdtempSync(join(tmpdir(), "fsck-git-"));
+    const root = join(top, "repo");
+    const sub = join(root, "packages", "app");
+    mkdirSync(join(sub, ".cursor"), { recursive: true });
+    mkdirSync(join(root, ".git"));
+    writeFileSync(join(root, ".mcp.json"), JSON.stringify({ mcpServers: { rootish: { command: "root-mcp" } } }));
+    writeFileSync(join(top, ".mcp.json"), JSON.stringify({ mcpServers: { outside: { command: "nope" } } }));
+    writeFileSync(join(sub, ".cursor", "mcp.json"), JSON.stringify({ mcpServers: { local: { command: "local-mcp" } } }));
+    expect(projectSearchDirs(sub)).toEqual([sub, join(root, "packages"), root]);
+    const { configs } = discoverConfigs(sub);
+    expect(configs.find((config) => config.path === join(root, ".mcp.json"))?.servers.map((server) => server.name)).toEqual(["rootish"]);
+    expect(configs.find((config) => config.path === join(sub, ".cursor", "mcp.json"))?.servers.map((server) => server.name)).toEqual(["local"]);
+    expect(configs.some((config) => config.path === join(top, ".mcp.json"))).toBe(false);
   });
 
   it("keeps an unreadable path as an existing config so the scan can fail it", async () => {
