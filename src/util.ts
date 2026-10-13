@@ -1,5 +1,3 @@
-import { homedir } from "node:os";
-
 /**
  * Parse JSON that may contain comments and trailing commas (VS Code's mcp.json
  * is JSONC). Strings are respected so "//" inside a value is never stripped.
@@ -105,6 +103,22 @@ export function redactSecret(value: string): string {
   return `${value.slice(0, 4)}…(redacted, ${value.length} chars)`;
 }
 
-export function home(): string {
-  return homedir();
+/** Hostnames that stay on the machine. Plain HTTP to these is a local-only risk. */
+export function isLocalHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return (
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host === "0.0.0.0" ||
+    host === "::1" ||
+    host === "::" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local")
+  );
+}
+
+const CREDENTIAL_HEADER = /(authorization|auth|api[-_]?key|apikey|token|secret|password)/i;
+
+export function isCredentialHeaderName(name: string): boolean {
+  return CREDENTIAL_HEADER.test(name);
 }

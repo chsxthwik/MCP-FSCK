@@ -39,6 +39,26 @@ describe("parseConfigContents", () => {
     expect(servers).toHaveLength(1);
   });
 
+  it("parses Claude Code project servers nested in ~/.claude.json", () => {
+    const text = JSON.stringify({
+      mcpServers: { hub: { command: "node", args: ["user.js"] } },
+      projects: {
+        "/work/app": {
+          mcpServers: {
+            hub: { command: "node", args: ["local.js"] },
+            docs: { type: "streamable-http", url: "https://example.com/mcp" },
+            off: { command: "node", disabled: true },
+          },
+        },
+      },
+    });
+    const { servers, error } = parseConfigContents("/home/me/.claude.json", "claude-code", text);
+    expect(error).toBeUndefined();
+    expect(servers.map((server) => server.name)).toEqual(["hub", "hub @ app", "docs @ app"]);
+    expect(servers[1]).toMatchObject({ command: "node", args: ["local.js"] });
+    expect(servers[2]).toMatchObject({ transport: "http", url: "https://example.com/mcp" });
+  });
+
   it("reports invalid JSON as an error", () => {
     const { servers, error } = parseConfigContents("/p", "test", "{ not json ]");
     expect(servers).toHaveLength(0);

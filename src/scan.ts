@@ -7,6 +7,11 @@ function keyOf(server: ParsedServer): string {
   return `${server.source}::${server.name}`;
 }
 
+function ruleWarning(ruleId: string, where: string, err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return `${ruleId} failed on ${where}: ${message}`;
+}
+
 export async function scan(options: ScanOptions, configs: ConfigFile[]): Promise<ScanResult> {
   const allServers = configs.flatMap((c) => c.servers);
 
@@ -14,7 +19,8 @@ export async function scan(options: ScanOptions, configs: ConfigFile[]): Promise
   const deep = new Map<string, DeepResult>();
   if (options.deep) {
     const targets = allServers.filter((s) => s.transport === "stdio" || s.transport === "http" || s.transport === "sse");
-    const results = await mapPool(targets, 4, (server) => enumerateTools(server, options.timeoutMs));
+    const version = options.clientVersion ?? "0.0.0";
+    const results = await mapPool(targets, 4, (server) => enumerateTools(server, options.timeoutMs, version));
     for (let i = 0; i < targets.length; i += 1) {
       deep.set(keyOf(targets[i]!), results[i]!);
     }
@@ -23,15 +29,44 @@ export async function scan(options: ScanOptions, configs: ConfigFile[]): Promise
   // ---- rules ----------------------------------------------------------
   const context: RuleContext = { allServers, deep };
   const findings: Finding[] = [];
+  const warnings: string[] = [];
+  for (const probed of deep.values()) {
+    if (probed.warning !== undefined) warnings.push(`${probed.server}: ${probed.warning}`);
+  }
 
   for (const config of configs) {
+    if (!config.exists) continue;
+    for (const rule of ALL_RULES) {
+      if (rule.runConfig === undefined) continue;
+      let raws;
+      try {
+        raws = rule.runConfig(config);
+      } catch (err) {
+        warnings.push(ruleWarning(rule.meta.id, config.path, err));
+        continue;
+      }
+      for (const raw of raws) {
+        findings.push({
+          ruleId: rule.meta.id,
+          ruleName: rule.meta.name,
+          severity: raw.severity ?? rule.meta.severity,
+          title: raw.title,
+          detail: raw.detail,
+          evidence: raw.evidence,
+          remediation: raw.remediation ?? rule.meta.remediation,
+          source: config.path,
+          deep: false,
+        });
+      }
+    }
     for (const server of config.servers) {
       for (const rule of ALL_RULES) {
         let raws;
         try {
           raws = rule.run(server, context);
-        } catch {
-          continue; // a broken rule must never take down the scan
+        } catch (err) {
+          warnings.push(ruleWarning(rule.meta.id, `${server.name} (${config.path})`, err));
+          continue;
         }
         for (const raw of raws) {
           findings.push({
@@ -79,6 +114,7 @@ export async function scan(options: ScanOptions, configs: ConfigFile[]): Promise
     deep: [...deep.values()],
     findings: kept,
     suppressed,
+    warnings,
     summary,
   };
 }

@@ -1,4 +1,4 @@
-import { existsSync, realpathSync, readFileSync, statSync } from "node:fs";
+import { existsSync, realpathSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join, resolve } from "node:path";
 import { parseConfigFile } from "./parse.js";
@@ -37,9 +37,29 @@ function editorConfigDir(editor: string): string {
   return join(homedir(), ".config", editor, "User");
 }
 
+/** `mcp.json` in a VS Code-style user dir, plus each profile's copy. */
+export function mcpJsonUnderUserDir(userDir: string): string[] {
+  const out = [join(userDir, "mcp.json")];
+  try {
+    for (const entry of readdirSync(join(userDir, "profiles"), { withFileTypes: true })) {
+      if (entry.isDirectory()) out.push(join(userDir, "profiles", entry.name, "mcp.json"));
+    }
+  } catch {
+    // the editor has no profiles directory
+  }
+  return out;
+}
+
 function vscodeUserPaths(): string[] {
   const variants = ["Code", "Code - OSS", "Code - Insiders", "Cursor", "VSCodium"];
-  return variants.map((v) => join(editorConfigDir(v), "mcp.json"));
+  return variants.flatMap((variant) => mcpJsonUnderUserDir(editorConfigDir(variant)));
+}
+
+function claudeCodePaths(): string[] {
+  const paths = [join(homedir(), ".claude.json")];
+  const override = process.env.CLAUDE_CONFIG_DIR;
+  if (override !== undefined && override.trim() !== "") paths.push(join(override, ".claude.json"));
+  return paths;
 }
 
 /** Cline / Roo Code / Kilo Code store MCP settings in the editor's globalStorage. */
@@ -82,7 +102,7 @@ export function candidateConfigFiles(cwd: string): Candidate[] {
   const home = homedir();
   return [
     { client: "claude-desktop", paths: [claudeDesktopPath()] },
-    { client: "claude-code", paths: [join(home, ".claude.json")] },
+    { client: "claude-code", paths: claudeCodePaths() },
     { client: "claude-code-project", paths: [join(cwd, ".mcp.json")] },
     { client: "cursor", paths: [join(home, ".cursor", "mcp.json")] },
     { client: "cursor-project", paths: [join(cwd, ".cursor", "mcp.json")] },
@@ -92,45 +112,32 @@ export function candidateConfigFiles(cwd: string): Candidate[] {
     { client: "gemini-cli", paths: [join(home, ".gemini", "settings.json"), join(cwd, ".gemini", "settings.json")] },
     { client: "codex", paths: [join(home, ".codex", "config.toml"), join(cwd, ".codex", "config.toml")] },
     { client: "junie", paths: [join(home, ".junie", "mcp", "mcp.json")] },
+    { client: "amazon-q", paths: [join(home, ".aws", "amazonq", "mcp.json")] },
+    { client: "amazon-q-project", paths: [join(cwd, ".amazonq", "mcp.json")] },
     { client: "zed", paths: zedSettingsPaths() },
     { client: "zed-project", paths: [join(cwd, ".zed", "settings.json")] },
     ...vscodeForkExtensionMcpPaths().map(({ client, path }) => ({ client, paths: [path] })),
   ];
 }
 
-function dedupeRealpath(paths: string[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const p of paths) {
-    let key: string;
-    try {
-      key = realpathSync(p);
-    } catch {
-      key = resolve(p);
-    }
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(p);
-  }
-  return out;
-}
-
-/** Locate and parse every known MCP config. Non-existent files are reported with exists=false. */
+/** Locate and parse every known MCP config that exists on disk. */
 export function discoverConfigs(cwd: string = process.cwd()): DiscoveryResult {
   const configs: ConfigFile[] = [];
   const seen = new Set<string>();
   for (const candidate of candidateConfigFiles(cwd)) {
-    for (const path of dedupeRealpath(candidate.paths)) {
-      if (seen.has(path)) continue;
-      seen.add(path);
-      if (!existsSync(path)) {
-        configs.push({ path, client: candidate.client, exists: false, servers: [] });
-        continue;
+    for (const path of candidate.paths) {
+      if (!existsSync(path)) continue;
+      let key: string;
+      try {
+        key = realpathSync(path);
+      } catch {
+        key = resolve(path);
       }
+      if (seen.has(key)) continue;
+      seen.add(key);
       let contents: string | null = null;
       let error: string | undefined;
       try {
-        // refuse to read special files (fifos etc.)
         if (!statSync(path).isFile()) {
           error = "not a regular file";
         } else {
@@ -139,8 +146,8 @@ export function discoverConfigs(cwd: string = process.cwd()): DiscoveryResult {
       } catch (err) {
         error = `unreadable: ${(err as Error).message}`;
       }
-      const cfg = parseConfigFile(path, candidate.client, contents !== null, contents);
-      if (error !== undefined && cfg.error === undefined) cfg.error = error;
+      const cfg = parseConfigFile(path, candidate.client, contents, true);
+      if (error !== undefined) cfg.error = error;
       configs.push(cfg);
     }
   }
@@ -151,17 +158,21 @@ export function discoverConfigs(cwd: string = process.cwd()): DiscoveryResult {
 export function loadExplicitConfigs(paths: string[]): ConfigFile[] {
   return paths.map((path) => {
     if (!existsSync(path)) {
-      return { path, client: "explicit", exists: false, servers: [] } satisfies ConfigFile;
+      return { path, client: "explicit", exists: false, servers: [], error: "file not found" } satisfies ConfigFile;
     }
     let contents: string | null = null;
     let error: string | undefined;
     try {
-      contents = readFileSync(path, "utf8");
+      if (!statSync(path).isFile()) {
+        error = "not a regular file";
+      } else {
+        contents = readFileSync(path, "utf8");
+      }
     } catch (err) {
       error = `unreadable: ${(err as Error).message}`;
     }
-    const cfg = parseConfigFile(path, "explicit", contents !== null, contents);
-    if (error !== undefined && cfg.error === undefined) cfg.error = error;
+    const cfg = parseConfigFile(path, "explicit", contents, true);
+    if (error !== undefined) cfg.error = error;
     return cfg;
   });
 }

@@ -34,6 +34,41 @@ function normalizeTransport(entry: z.infer<typeof serverEntry>): Transport | nul
   return null;
 }
 
+function uniqueName(base: string, taken: Set<string>): string {
+  if (!taken.has(base)) {
+    taken.add(base);
+    return base;
+  }
+  let n = 2;
+  while (taken.has(`${base} #${n}`)) n += 1;
+  const name = `${base} #${n}`;
+  taken.add(name);
+  return name;
+}
+
+function pushNamedServers(
+  servers: ParsedServer[],
+  taken: Set<string>,
+  map: Record<string, unknown>,
+  path: string,
+  client: string,
+  scopeHint?: string,
+): void {
+  for (const [name, value] of Object.entries(map)) {
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      const record = value as Record<string, unknown>;
+      if (record["enabled"] === false || record["disabled"] === true) continue;
+    }
+    const parsed = serverEntry.safeParse(value);
+    if (!parsed.success) continue;
+    const entry = parsed.data;
+    const transport = normalizeTransport(entry);
+    if (transport === null) continue;
+    const base = scopeHint !== undefined ? `${name} @ ${scopeHint}` : name;
+    servers.push(toServer(uniqueName(base, taken), { ...entry, transport }, path, client, value));
+  }
+}
+
 function toServer(
   name: string,
   entry: { command?: string; args?: string[]; env?: Record<string, string>; cwd?: string; url?: string; headers?: Record<string, string>; transport: Transport },
@@ -130,34 +165,32 @@ export function parseConfigContents(path: string, client: string, text: string):
     return { servers };
   }
 
-  const map =
-    (obj["mcpServers"] as unknown) ??
-    (obj["servers"] as unknown) ??
-    null;
-  if (map === null) return { servers: [] };
-  if (typeof map !== "object" || Array.isArray(map)) {
-    return { servers: [], error: '"mcpServers"/"servers" is not an object' };
+  const taken = new Set<string>();
+  const servers: ParsedServer[] = [];
+  let error: string | undefined;
+  const top = (obj["mcpServers"] as unknown) ?? (obj["servers"] as unknown) ?? null;
+  if (top !== null) {
+    if (typeof top !== "object" || Array.isArray(top)) {
+      error = '"mcpServers"/"servers" is not an object';
+    } else {
+      // `enabled = false` / `disabled = true` are skipped inside pushNamedServers.
+      pushNamedServers(servers, taken, top as Record<string, unknown>, path, client);
+    }
   }
 
-  const servers: ParsedServer[] = [];
-  for (const [name, value] of Object.entries(map as Record<string, unknown>)) {
-    // `enabled = false` (Codex-style) / `disabled = true` (Cline-style) mark
-    // an entry inert — skip it entirely so it is never scanned or launched.
-    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-      const v = value as Record<string, unknown>;
-      if (v["enabled"] === false || v["disabled"] === true) continue;
+  // Claude Code stores per-project servers in ~/.claude.json under
+  // projects.<absolute path>.mcpServers, separate from the user-level map.
+  const projects = obj["projects"];
+  if (projects !== null && typeof projects === "object" && !Array.isArray(projects)) {
+    for (const [projectPath, project] of Object.entries(projects as Record<string, unknown>)) {
+      if (project === null || typeof project !== "object" || Array.isArray(project)) continue;
+      const nested = (project as Record<string, unknown>)["mcpServers"];
+      if (nested === null || typeof nested !== "object" || Array.isArray(nested)) continue;
+      const hint = projectPath.split(/[/\\]/).filter(Boolean).pop() ?? "project";
+      pushNamedServers(servers, taken, nested as Record<string, unknown>, path, client, hint);
     }
-    const parsed = serverEntry.safeParse(value);
-    if (!parsed.success) {
-      // keep scanning siblings; skip entries we cannot make sense of
-      continue;
-    }
-    const entry = parsed.data;
-    const transport = normalizeTransport(entry);
-    if (transport === null) continue;
-    servers.push(toServer(name, { ...entry, transport }, path, client, value));
   }
-  return { servers };
+  return { servers, error };
 }
 
 /**
@@ -206,9 +239,12 @@ export function parseCodexContents(path: string, client: string, text: string): 
   return { servers };
 }
 
-export function parseConfigFile(path: string, client: string, exists: boolean, contents: string | null): ConfigFile {
-  if (!exists || contents === null) {
+export function parseConfigFile(path: string, client: string, contents: string | null, exists = contents !== null): ConfigFile {
+  if (!exists) {
     return { path, client, exists: false, servers: [] };
+  }
+  if (contents === null) {
+    return { path, client, exists: true, servers: [], error: "unreadable" };
   }
   const outcome = parseConfigContents(path, client, contents);
   return { path, client, exists: true, servers: outcome.servers, error: outcome.error };

