@@ -1,8 +1,8 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { applyBaseline, baselineFrom, loadBaseline } from "../src/baseline.js";
+import { applyBaseline, baselineFrom, loadBaseline, portableSource } from "../src/baseline.js";
 import type { Finding } from "../src/types.js";
 
 function finding(overrides: Partial<Finding> = {}): Finding {
@@ -49,6 +49,41 @@ describe("baselineFrom", () => {
   it("emits deduped entries covering the findings", () => {
     const baseline = baselineFrom([finding(), finding()]);
     expect(baseline.ignore).toEqual([{ rule: "MCP004", server: "fs", source: "/cfg/mcp.json" }]);
+  });
+
+  it("stores project paths relative to cwd and home paths with a tilde", () => {
+    const cwd = "/work/repo";
+    const project = baselineFrom([finding({ source: "/work/repo/.cursor/mcp.json" })], cwd);
+    expect(project.ignore[0]!.source).toBe(".cursor/mcp.json");
+    const homePath = join(homedir(), ".cursor", "mcp.json");
+    const home = baselineFrom([finding({ source: homePath })], cwd);
+    expect(home.ignore[0]!.source).toBe("~/.cursor/mcp.json");
+    expect(portableSource(join(cwd, "mcp.json"), cwd)).toBe("mcp.json");
+  });
+});
+
+describe("portable baseline matching", () => {
+  it("suppresses a finding from a ~/ source on this machine", () => {
+    const source = join(homedir(), ".cursor", "mcp.json");
+    const { suppressed } = applyBaseline([finding({ source })], [{ rule: "MCP004", server: "fs", source: "~/.cursor/mcp.json" }]);
+    expect(suppressed).toHaveLength(1);
+  });
+
+  it("suppresses a relative source that is not a substring of the absolute path", () => {
+    const cwd = "/work/repo/pkg";
+    const source = "/work/repo/mcp.json";
+    expect(source.includes("../mcp.json")).toBe(false);
+    const { suppressed } = applyBaseline(
+      [finding({ source })],
+      [{ rule: "MCP004", server: "fs", source: "../mcp.json" }],
+      cwd,
+    );
+    expect(suppressed).toHaveLength(1);
+  });
+
+  it("still matches an absolute source written by an older baseline", () => {
+    const { suppressed } = applyBaseline([finding()], [{ rule: "MCP004", server: "fs", source: "/cfg/mcp.json" }]);
+    expect(suppressed).toHaveLength(1);
   });
 });
 

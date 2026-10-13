@@ -52,9 +52,10 @@ describe("parseConfigContents", () => {
         },
       },
     });
-    const { servers, error } = parseConfigContents("/home/me/.claude.json", "claude-code", text);
+    const { servers, skipped, error } = parseConfigContents("/home/me/.claude.json", "claude-code", text);
     expect(error).toBeUndefined();
     expect(servers.map((server) => server.name)).toEqual(["hub", "hub @ app", "docs @ app"]);
+    expect(skipped).toEqual([{ name: "off @ app", reason: "disabled" }]);
     expect(servers[1]).toMatchObject({ command: "node", args: ["local.js"] });
     expect(servers[2]).toMatchObject({ transport: "http", url: "https://example.com/mcp" });
   });
@@ -79,8 +80,12 @@ describe("parseConfigContents", () => {
         on: { command: "node" },
       },
     });
-    const { servers } = parseConfigContents("/p", "test", text);
+    const { servers, skipped } = parseConfigContents("/p", "test", text);
     expect(servers.map((s) => s.name)).toEqual(["on"]);
+    expect(skipped).toEqual([
+      { name: "off", reason: "disabled" },
+      { name: "off2", reason: "disabled" },
+    ]);
   });
 
   it("coerces non-string args and env values instead of dropping the server", () => {
@@ -147,8 +152,9 @@ enabled = false
 command = "node"
 args = ["ok.js"]
 `;
-    const { servers } = parseConfigContents("/x/config.toml", "codex", text);
+    const { servers, skipped } = parseConfigContents("/x/config.toml", "codex", text);
     expect(servers.map((s) => s.name)).toEqual(["on"]);
+    expect(skipped).toEqual([{ name: "off", reason: "disabled" }]);
   });
 
   it("keeps Codex credential references out of headers", () => {

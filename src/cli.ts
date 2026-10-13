@@ -199,17 +199,37 @@ program
       for (const server of config.servers) {
         console.log(`  · ${server.name} (${server.transport}) ${serverTarget(server)}`);
       }
-      if (config.servers.length === 0) console.log("  · (no servers defined)");
+      for (const skipped of config.skipped ?? []) {
+        console.log(`  · ${skipped.name} (disabled, not scanned)`);
+      }
+      if (config.servers.length === 0 && (config.skipped?.length ?? 0) === 0) console.log("  · (no servers defined)");
     }
   });
 
 program
   .command("rules")
   .description("List the audit rules and their severities.")
-  .action(() => {
-    for (const rule of ALL_RULES) {
-      console.log(`${rule.meta.id}  ${rule.meta.name.padEnd(34)} ${rule.meta.scope.padEnd(7)} ${rule.meta.severity.padEnd(9)} ${rule.meta.description}`);
+  .argument("[id]", "print one rule in full, by id or name (for example MCP008)")
+  .action((id?: string) => {
+    if (id === undefined) {
+      for (const rule of ALL_RULES) {
+        console.log(`${rule.meta.id}  ${rule.meta.name.padEnd(34)} ${rule.meta.scope.padEnd(7)} ${rule.meta.severity.padEnd(9)} ${rule.meta.description}`);
+      }
+      return;
     }
+    const needle = id.toLowerCase();
+    const rule = ALL_RULES.find((entry) => entry.meta.id.toLowerCase() === needle || entry.meta.name === id);
+    if (rule === undefined) {
+      console.error(`mcp-fsck: unknown rule "${id}" (try: mcp-fsck rules)`);
+      process.exitCode = 2;
+      return;
+    }
+    const meta = rule.meta;
+    console.log(`${meta.id}  ${meta.name}`);
+    console.log(`  severity     ${meta.severity}`);
+    console.log(`  scope        ${meta.scope}`);
+    console.log(`  ${meta.description}`);
+    console.log(`  → ${meta.remediation}`);
   });
 
 program.parseAsync(process.argv).catch((err: Error) => {
