@@ -3,14 +3,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { baselineFrom, loadBaseline, resolveBaselinePath, writeBaseline, DEFAULT_BASELINE_NAME } from "./baseline.js";
+import { DEFAULT_TIMEOUT_MS } from "./deep.js";
 import { discoverConfigs, loadExplicitConfigs } from "./discovery.js";
 import { renderJson, renderTerminal, severityAtLeast } from "./report.js";
 import { ALL_RULES } from "./rules/index.js";
-import { mayContainSecret } from "./rules/static.js";
+import { mayContainSecret, redactCommandArg, redactKnownSecrets } from "./rules/static.js";
 import { renderSarif } from "./sarif.js";
 import { scan } from "./scan.js";
 import { worstSeverity } from "./score.js";
-import { redactSecret } from "./util.js";
+import { isCredentialHeaderName, looksLikePlaceholder, redactSecret } from "./util.js";
 import type { ScanOptions, Severity, ConfigFile, IgnoreEntry } from "./types.js";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -22,21 +23,40 @@ const FAIL_ON_VALUES = ["critical", "high", "medium", "low", "info", "none"] as 
  * Deep-copy configs with env/header values that look like credentials
  * redacted, so `--json` output is safe to paste into CI logs or issues.
  */
+function redactConfigValue(key: string, value: string, header: boolean): string {
+  const credentialHeader = header && isCredentialHeaderName(key) && value.length >= 8 && !looksLikePlaceholder(value);
+  if (mayContainSecret(key, value) || credentialHeader) return redactSecret(value);
+  return redactKnownSecrets(value);
+}
+
+function redactRecord(record: Record<string, string> | undefined, header = false): Record<string, string> | undefined {
+  if (record === undefined) return undefined;
+  return Object.fromEntries(Object.entries(record).map(([key, value]) => [key, redactConfigValue(key, value, header)]));
+}
+
+function sanitizeUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.username !== "" || url.password !== "") {
+      url.username = url.username === "" ? "" : "redacted";
+      url.password = url.password === "" ? "" : "redacted";
+    }
+    return redactKnownSecrets(url.toString());
+  } catch {
+    return redactKnownSecrets(value);
+  }
+}
+
 function sanitizeConfigsForJson(configs: ConfigFile[]): ConfigFile[] {
   return configs.map((config) => ({
     ...config,
     servers: config.servers.map((server) => ({
       ...server,
-      env: server.env === undefined
-        ? undefined
-        : Object.fromEntries(
-            Object.entries(server.env).map(([k, v]) => [k, mayContainSecret(k, v) ? redactSecret(v) : v]),
-          ),
-      headers: server.headers === undefined
-        ? undefined
-        : Object.fromEntries(
-            Object.entries(server.headers).map(([k, v]) => [k, mayContainSecret(k, v) ? redactSecret(v) : v]),
-          ),
+      command: server.command === undefined ? undefined : redactKnownSecrets(server.command),
+      args: server.args?.map((arg) => redactCommandArg(arg)),
+      env: redactRecord(server.env),
+      headers: redactRecord(server.headers, true),
+      url: server.url === undefined ? undefined : sanitizeUrl(server.url),
       raw: undefined,
     })),
   }));
@@ -52,7 +72,7 @@ async function runScan(
     process.exitCode = 2;
     return;
   }
-  const timeoutMs = Number.parseInt(opts.timeout ?? "10000", 10);
+  const timeoutMs = Number.parseInt(opts.timeout ?? String(DEFAULT_TIMEOUT_MS), 10);
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     console.error("mcp-fsck: --timeout must be a positive number of milliseconds");
     process.exitCode = 2;
@@ -72,7 +92,13 @@ async function runScan(
   }
 
   const configs = paths.length > 0 ? loadExplicitConfigs(paths) : discoverConfigs().configs;
-  const options: ScanOptions = { deep: opts.deep === true, timeoutMs, baseline };
+  const missing = configs.filter((config) => !config.exists);
+  if (missing.length > 0) {
+    for (const config of missing) console.error(`mcp-fsck: config not found: ${config.path}`);
+    process.exitCode = 2;
+    return;
+  }
+  const options: ScanOptions = { deep: opts.deep === true, timeoutMs, baseline, clientVersion: pkg.version };
   const result = await scan(options, configs);
 
   if (opts.writeBaseline !== undefined) {
@@ -99,6 +125,8 @@ async function runScan(
     const worst = worstSeverity(result.findings);
     if (worst !== null && severityAtLeast(worst, failOn as Severity)) {
       process.exitCode = 1;
+      const count = result.findings.length;
+      console.error(`mcp-fsck: ${count} finding(s), worst is ${worst}, fail-on is ${failOn}`);
     }
   }
 }
@@ -115,7 +143,7 @@ program
   .description("Scan discovered MCP configs (or the config files passed as arguments).")
   .argument("[paths...]", "explicit config file paths to scan instead of auto-discovery")
   .option("--deep", "enumerate tools from running MCP servers (executes the servers; only audit configs you control)")
-  .option("--timeout <ms>", "per-server timeout for deep mode, in milliseconds", "10000")
+  .option("--timeout <ms>", "per-server timeout for deep mode, in milliseconds", String(DEFAULT_TIMEOUT_MS))
   .option("--json", "machine-readable JSON output (secrets redacted)", false)
   .option("--sarif <file>", "also write findings as SARIF 2.1.0 (for codeql-action/upload-sarif)")
   .option("--baseline <file>", `suppression file (default: ${DEFAULT_BASELINE_NAME} in the working directory)`)

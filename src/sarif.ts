@@ -1,3 +1,4 @@
+import { pathToFileURL } from "node:url";
 import type { Finding, ScanResult, Severity } from "./types.js";
 import { ALL_RULES } from "./rules/index.js";
 
@@ -32,7 +33,7 @@ function toResult(finding: Finding, suppressed: boolean): SarifResult {
     locations: [
       {
         physicalLocation: {
-          artifactLocation: { uri: `file://${finding.source}` },
+          artifactLocation: { uri: pathToFileURL(finding.source).href },
         },
       },
     ],
