@@ -1,5 +1,7 @@
 export type Severity = "critical" | "high" | "medium" | "low" | "info";
 
+export type GradeLetter = "A" | "B" | "C" | "D" | "F";
+
 export const SEVERITY_ORDER: Record<Severity, number> = {
   critical: 4,
   high: 3,
@@ -29,11 +31,19 @@ export interface ParsedServer {
   raw: unknown;
 }
 
+/** A server entry that is present in the file but must not be launched or audited. */
+export interface SkippedServer {
+  name: string;
+  reason: "disabled";
+}
+
 export interface ConfigFile {
   path: string;
   client: string;
   exists: boolean;
   servers: ParsedServer[];
+  /** entries with enabled=false / disabled=true — listed, never scanned or started */
+  skipped?: SkippedServer[];
   /** parse error, if the file exists but could not be read/parsed */
   error?: string;
 }
@@ -103,12 +113,29 @@ export interface IgnoreEntry {
   source?: string;
 }
 
+/** Grade for one config file, or for one server inside it. */
+export interface GradedTarget {
+  source: string;
+  /** omitted for the file-level grade */
+  server?: string;
+  grade: GradeLetter;
+  score: number;
+  findings: number;
+  /** set when a deep handshake returned a tool list */
+  tools?: number;
+}
+
 export interface ScanSummary {
   configsScanned: number;
   serversFound: number;
   findings: Record<Severity, number>;
   /** findings suppressed by a baseline file */
   suppressed: number;
+  /** same letter the terminal prints on the first line */
+  grade: GradeLetter;
+  score: number;
+  /** servers present in the files but marked enabled=false / disabled=true */
+  disabled: number;
 }
 
 export interface ScanResult {
@@ -123,6 +150,8 @@ export interface ScanResult {
   warnings: string[];
   /** baseline file applied to this scan, when one was loaded */
   baselinePath?: string;
+  /** file grades (no server) and per-server grades, same numbers the terminal prints */
+  grades: GradedTarget[];
   summary: ScanSummary;
 }
 

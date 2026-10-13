@@ -1,7 +1,8 @@
 import { applyBaseline } from "./baseline.js";
 import { enumerateTools, mapPool } from "./deep.js";
 import { ALL_RULES } from "./rules/index.js";
-import { SEVERITY_ORDER, type ConfigFile, type DeepResult, type Finding, type ParsedServer, type RuleContext, type ScanOptions, type ScanResult } from "./types.js";
+import { grade, riskScore } from "./score.js";
+import { SEVERITY_ORDER, type ConfigFile, type DeepResult, type Finding, type GradedTarget, type ParsedServer, type RuleContext, type ScanOptions, type ScanResult } from "./types.js";
 
 function keyOf(server: ParsedServer): string {
   return `${server.source}::${server.name}`;
@@ -99,13 +100,43 @@ export async function scan(options: ScanOptions, configs: ConfigFile[]): Promise
   // ---- baseline suppressions ----------------------------------------
   const { kept, suppressed } = applyBaseline(findings, options.baseline ?? []);
 
+  const score = riskScore(kept);
   const summary = {
     configsScanned: configs.filter((c) => c.exists).length,
     serversFound: allServers.length,
     findings: { critical: 0, high: 0, medium: 0, low: 0, info: 0 },
     suppressed: suppressed.length,
+    grade: grade(score, kept.some((finding) => finding.severity === "critical")),
+    score,
+    disabled: configs.reduce((count, config) => count + (config.skipped?.length ?? 0), 0),
   } satisfies ScanResult["summary"];
   for (const f of kept) summary.findings[f.severity] += 1;
+
+  const grades: GradedTarget[] = [];
+  for (const config of configs) {
+    if (!config.exists) continue;
+    const fileFindings = kept.filter((finding) => finding.source === config.path);
+    const fileScore = riskScore(fileFindings);
+    grades.push({
+      source: config.path,
+      grade: grade(fileScore, fileFindings.some((finding) => finding.severity === "critical")),
+      score: fileScore,
+      findings: fileFindings.length,
+    });
+    for (const server of config.servers) {
+      const serverFindings = fileFindings.filter((finding) => finding.server === server.name);
+      const serverScore = riskScore(serverFindings);
+      const probed = deep.get(keyOf(server));
+      grades.push({
+        source: config.path,
+        server: server.name,
+        grade: grade(serverScore, serverFindings.some((finding) => finding.severity === "critical")),
+        score: serverScore,
+        findings: serverFindings.length,
+        ...(probed?.status === "ok" ? { tools: probed.tools.length } : {}),
+      });
+    }
+  }
 
   return {
     scannedAt: new Date().toISOString(),
@@ -116,6 +147,7 @@ export async function scan(options: ScanOptions, configs: ConfigFile[]): Promise
     suppressed,
     warnings,
     ...(options.baselinePath !== undefined ? { baselinePath: options.baselinePath } : {}),
+    grades,
     summary,
   };
 }

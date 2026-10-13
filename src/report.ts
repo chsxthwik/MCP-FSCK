@@ -1,7 +1,7 @@
 import pc from "picocolors";
 import { redactText } from "./rules/static.js";
 import { grade, riskScore } from "./score.js";
-import { SEVERITY_ORDER, type ConfigFile, type Finding, type ParsedServer, type ScanResult, type Severity } from "./types.js";
+import { SEVERITY_ORDER, type ConfigFile, type Finding, type GradedTarget, type ParsedServer, type ScanResult, type Severity } from "./types.js";
 import { redactUrl } from "./util.js";
 
 const SEVERITY_LABEL: Record<Severity, string> = {
@@ -83,17 +83,35 @@ function configFindings(config: ConfigFile, findings: Finding[]): Finding[] {
   return findings.filter((finding) => finding.source === config.path);
 }
 
-function renderConfig(config: ConfigFile, findings: Finding[], indent: string): string[] {
+function gradedTarget(result: ScanResult, source: string, server?: string): GradedTarget | undefined {
+  return result.grades.find((row) => row.source === source && row.server === server);
+}
+
+function gradeParen(row: GradedTarget): string {
+  const findings = `${row.findings} finding${row.findings === 1 ? "" : "s"}`;
+  const tools = row.tools === undefined ? "" : `, ${row.tools} tool${row.tools === 1 ? "" : "s"}`;
+  return `(score ${row.score}, ${findings}${tools})`;
+}
+
+function renderConfig(config: ConfigFile, result: ScanResult, indent: string): string[] {
+  const findings = result.findings;
   const lines: string[] = [];
-  const header = `${config.client} ${pc.dim(abbreviateHome(config.path))}`;
+  const fileGrade = gradedTarget(result, config.path);
+  const fileGradeText = fileGrade === undefined ? "" : `  ${pc.dim("grade")} ${gradeColor(fileGrade.grade)}`;
+  const header = `${config.client} ${pc.dim(abbreviateHome(config.path))}${fileGradeText}`;
   lines.push(`${indent}${pc.bold(header)}`);
   if (config.error !== undefined) {
     lines.push(`${indent}  ${pc.red("parse error:")} ${config.error}`);
   }
   const unscoped = findings.filter((finding) => finding.source === config.path && finding.server === undefined);
   if (unscoped.length > 0) lines.push(...renderServerFindings(unscoped));
+  for (const skipped of config.skipped ?? []) {
+    lines.push(`${indent}  ${skipped.name}  ${pc.dim("disabled, not scanned")}`);
+  }
   if (config.servers.length === 0) {
-    if (config.exists && unscoped.length === 0) lines.push(`${indent}  ${pc.dim("no MCP servers defined")}`);
+    if (config.exists && unscoped.length === 0 && (config.skipped?.length ?? 0) === 0) {
+      lines.push(`${indent}  ${pc.dim("no MCP servers defined")}`);
+    }
     return lines;
   }
   const ranked = [...config.servers].sort((a, b) => {
@@ -105,9 +123,14 @@ function renderConfig(config: ConfigFile, findings: Finding[], indent: string): 
   });
   for (const server of ranked) {
     const serverFindings = findings.filter((f) => f.source === config.path && f.server === server.name);
-    const score = riskScore(serverFindings);
-    const letter = grade(score, serverFindings.some((f) => f.severity === "critical"));
-    lines.push(`${indent}  ${serverLabel(server)}  ${pc.dim("grade")} ${gradeColor(letter)} ${pc.dim(`(score ${score}, ${serverFindings.length} finding${serverFindings.length === 1 ? "" : "s"})`)}`);
+    const row = gradedTarget(result, config.path, server.name) ?? {
+      source: config.path,
+      server: server.name,
+      grade: grade(riskScore(serverFindings), serverFindings.some((f) => f.severity === "critical")),
+      score: riskScore(serverFindings),
+      findings: serverFindings.length,
+    };
+    lines.push(`${indent}  ${serverLabel(server)}  ${pc.dim("grade")} ${gradeColor(row.grade)} ${pc.dim(gradeParen(row))}`);
     if (serverFindings.length === 0) {
       lines.push(`${indent}      ${pc.green("✓")} ${pc.dim("no findings")}`);
     } else {
@@ -134,15 +157,16 @@ export function renderTerminal(result: ScanResult, version: string): string {
     s.suppressed > 0
       ? ` · ${s.suppressed} suppressed by ${result.baselinePath !== undefined ? abbreviateHome(result.baselinePath) : "baseline"}`
       : "";
+  const disabledNote = s.disabled > 0 ? ` · ${s.disabled} disabled` : "";
 
   lines.push("");
   lines.push(`  ${pc.bold("mcp-fsck")} ${pc.dim(`v${version} — integrity check for MCP server configs`)}`);
   const scannedConfigsForGrade = result.configs.filter((config) => config.exists);
   const overall = scannedConfigsForGrade.length === 0
     ? ""
-    : `${pc.dim("overall grade")} ${gradeColor(grade(riskScore(result.findings), result.findings.some((finding) => finding.severity === "critical")))} · `;
+    : `${pc.dim("overall grade")} ${gradeColor(s.grade)} ${pc.dim(`(score ${s.score})`)} · `;
   lines.push(
-    `  ${overall}scanned ${s.configsScanned} config file${s.configsScanned === 1 ? "" : "s"} · ${s.serversFound} server${s.serversFound === 1 ? "" : "s"} · ${result.findings.length} finding${result.findings.length === 1 ? "" : "s"}${counts.length > 0 ? ` (${counts})` : ""}${suppressedBy}`,
+    `  ${overall}scanned ${s.configsScanned} config file${s.configsScanned === 1 ? "" : "s"} · ${s.serversFound} server${s.serversFound === 1 ? "" : "s"} · ${result.findings.length} finding${result.findings.length === 1 ? "" : "s"}${counts.length > 0 ? ` (${counts})` : ""}${disabledNote}${suppressedBy}`,
   );
   if (result.deepUsed) {
     lines.push(`  ${pc.dim("deep mode: live tools/list handshakes were performed (no tools were executed)")}`);
@@ -159,7 +183,7 @@ export function renderTerminal(result: ScanResult, version: string): string {
   }
 
   for (const config of scannedConfigs) {
-    lines.push(...renderConfig(config, result.findings, "  "));
+    lines.push(...renderConfig(config, result, "  "));
     lines.push("");
   }
 

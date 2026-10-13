@@ -216,6 +216,34 @@ describe("MCP008 broad-filesystem-scope", () => {
       expect(findings, root).toHaveLength(1);
     }
   });
+
+  it("flags a root path passed as --flag= and as a directory env var or cwd", () => {
+    const flag = makeServer({ name: "filesystem", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "--root=/"] });
+    expect(runStaticRule("MCP008", flag, ctx())).toHaveLength(1);
+    const env = makeServer({
+      name: "filesystem",
+      command: "node",
+      args: ["server.js"],
+      env: { ALLOWED_DIRECTORIES: "/" },
+    });
+    expect(runStaticRule("MCP008", env, ctx())).toHaveLength(1);
+    const cwd = makeServer({ name: "fs", command: "node", args: ["server.js"] });
+    cwd.cwd = "/";
+    expect(runStaticRule("MCP008", cwd, ctx())).toHaveLength(1);
+  });
+
+  it("does not treat HOME or a project directory env as a granted root", () => {
+    const home = makeServer({
+      name: "filesystem",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "./workspace"],
+      env: { HOME: "/home/me", ALLOWED_DIRECTORIES: "/home/me/project" },
+    });
+    expect(runStaticRule("MCP008", home, ctx())).toHaveLength(0);
+    const other = makeServer({ name: "diffs", command: "node", args: ["tool.js"], env: { ALLOWED_DIRECTORIES: "/" } });
+    other.cwd = "/";
+    expect(runStaticRule("MCP008", other, ctx())).toHaveLength(0);
+  });
 });
 
 describe("MCP014 typosquat-lookalike-package", () => {
