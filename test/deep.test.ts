@@ -1,6 +1,8 @@
+import { createServer, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { enumerateTools, resolvedHeaders } from "../src/deep.js";
+import { enumerateTools, prepareDeepRequest, pullSseEvents, resolvedHeaders, takeStdioMessages } from "../src/deep.js";
 import { ALL_RULES } from "../src/rules/index.js";
 import { makeServer } from "./helpers.js";
 import type { RuleContext } from "../src/types.js";
@@ -111,5 +113,158 @@ describe("resolvedHeaders", () => {
     });
     const headers = resolvedHeaders(server);
     expect(headers).toEqual({ "X-Static": "v" });
+  });
+});
+
+const FRAMED = fileURLToPath(new URL("./fixtures/framed-mcp-server.mjs", import.meta.url));
+
+function listen(server: ReturnType<typeof createServer>): Promise<number> {
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      resolve((server.address() as AddressInfo).port);
+    });
+  });
+}
+
+describe("stdio framing", () => {
+  it("reassembles a Content-Length frame split across chunks", () => {
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 2, result: { tools: [] } });
+    const frame = Buffer.from(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+    const head = takeStdioMessages(frame.subarray(0, 12));
+    expect(head.messages).toHaveLength(0);
+    const rest = takeStdioMessages(Buffer.concat([head.buffer, frame.subarray(12)]));
+    expect(rest.messages[0]?.id).toBe(2);
+    expect(rest.buffer).toHaveLength(0);
+  });
+
+  it("reads a live Content-Length tools/list response", async () => {
+    const server = makeServer({ command: process.execPath, args: [FRAMED] });
+    const result = await enumerateTools(server, 8_000, "0.3.0");
+    expect(result.status).toBe("ok");
+    expect(result.tools.map((tool) => tool.name)).toEqual(["ping"]);
+  });
+
+  it("reports a process that exits before the handshake instead of waiting out the timeout", async () => {
+    const server = makeServer({ command: process.execPath, args: ["-e", "process.exit(0)"] });
+    const started = Date.now();
+    const result = await enumerateTools(server, 8_000);
+    expect(result.status).toBe("error");
+    expect(result.error).toMatch(/exited/i);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+});
+
+describe("prepareDeepRequest", () => {
+  it("strips credential headers and URL userinfo from non-local HTTP", () => {
+    const remote = prepareDeepRequest(
+      makeServer({ url: "http://user:s3cret@api.example.com/mcp", headers: { Authorization: "Bearer abc", "X-Tenant": "acme" } }),
+    );
+    expect(remote.withheld).toBe(true);
+    expect(remote.headers["Authorization"]).toBeUndefined();
+    expect(remote.headers["X-Tenant"]).toBe("acme");
+    expect(remote.url).not.toContain("s3cret");
+    const local = prepareDeepRequest(makeServer({ url: "http://127.0.0.1:9/mcp", headers: { Authorization: "Bearer abc" } }));
+    expect(local.withheld).toBe(false);
+    expect(local.headers["Authorization"]).toBe("Bearer abc");
+  });
+});
+
+describe("pullSseEvents", () => {
+  it("keeps an incomplete event in rest", () => {
+    const pulled = pullSseEvents("event: endpoint\ndata: /messages\n\nevent: message\ndata: {");
+    expect(pulled.events).toEqual([{ event: "endpoint", data: "/messages" }]);
+    expect(pulled.rest).toContain("event: message");
+  });
+});
+
+describe("remote handshakes", () => {
+  it("sends the streamable-HTTP session id before tools/list", async () => {
+    const seen: string[] = [];
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk;
+      });
+      req.on("end", () => {
+        const msg = JSON.parse(body) as { id?: number; method?: string };
+        if (msg.method === "tools/list") {
+          seen.push(String(req.headers["mcp-session-id"] ?? ""));
+          seen.push(String(req.headers["mcp-protocol-version"] ?? ""));
+          if (req.headers["mcp-session-id"] !== "sess-1") {
+            res.writeHead(400);
+            res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: { message: "missing session" } }));
+            return;
+          }
+        }
+        if (msg.id === undefined) {
+          res.writeHead(202);
+          res.end();
+          return;
+        }
+        const result = msg.method === "tools/list"
+          ? { tools: [{ name: "ping", description: "http pong" }] }
+          : { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "http", version: "0" } };
+        res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "sess-1" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }));
+      });
+    });
+    const port = await listen(server);
+    try {
+      const result = await enumerateTools(makeServer({ name: "remote", url: `http://127.0.0.1:${port}/mcp` }), 8_000, "0.3.0");
+      expect(result.status, result.error).toBe("ok");
+      expect(result.tools.map((tool) => tool.name)).toEqual(["ping"]);
+      expect(seen).toEqual(["sess-1", "2024-11-05"]);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+
+  it("does not call a websocket URL", async () => {
+    const result = await enumerateTools(makeServer({ url: "wss://example.com/mcp" }), 1_000);
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("websocket");
+  });
+
+  it("enumerates tools over the classic SSE endpoint event", async () => {
+    const clients = new Set<ServerResponse>();
+    const server = createServer((req, res) => {
+      if (req.method === "GET") {
+        res.writeHead(200, { "content-type": "text/event-stream", connection: "keep-alive", "cache-control": "no-cache" });
+        res.write("event: endpoint\ndata: /messages\n\n");
+        clients.add(res);
+        req.on("close", () => clients.delete(res));
+        return;
+      }
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk;
+      });
+      req.on("end", () => {
+        const msg = JSON.parse(body) as { id?: number; method?: string };
+        res.writeHead(202);
+        res.end();
+        if (msg.id === undefined) return;
+        const result = msg.method === "tools/list"
+          ? { tools: [{ name: "ping", description: "sse pong" }] }
+          : { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "sse", version: "0" } };
+        const frame = `event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: msg.id, result })}\n\n`;
+        for (const client of clients) client.write(frame);
+      });
+    });
+    const port = await listen(server);
+    try {
+      const result = await enumerateTools(
+        makeServer({ name: "events", transport: "sse", url: `http://127.0.0.1:${port}/sse` }),
+        8_000,
+        "0.3.0",
+      );
+      expect(result.status, result.error).toBe("ok");
+      expect(result.tools.map((tool) => tool.name)).toEqual(["ping"]);
+    } finally {
+      for (const client of clients) client.end();
+      server.closeAllConnections();
+      server.close();
+    }
   });
 });

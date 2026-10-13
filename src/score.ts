@@ -8,18 +8,15 @@ const WEIGHTS: Record<Severity, number> = {
   info: 0,
 };
 
-/** Crude but honest: sum of severity weights, capped at 100. */
+/** Sum of severity weights, capped at 100. One critical finding is graded F separately. */
 export function riskScore(findings: Finding[]): number {
   let score = 0;
-  for (const f of findings) {
-    // cap the damage any single rule can do to the score
-    score += WEIGHTS[f.severity];
-  }
+  for (const f of findings) score += WEIGHTS[f.severity];
   return Math.min(100, score);
 }
 
 export function grade(score: number, hasCritical: boolean = false): "A" | "B" | "C" | "D" | "F" {
-  if (hasCritical) return "F"; // any live critical finding means "act now", regardless of score
+  if (hasCritical) return "F";
   if (score <= 4) return "A";
   if (score <= 14) return "B";
   if (score <= 29) return "C";

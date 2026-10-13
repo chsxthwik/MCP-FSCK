@@ -1,7 +1,7 @@
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
-import { looksLikePlaceholder, redactSecret } from "../util.js";
-import type { ParsedServer, RawFinding, RuleContext, Severity } from "../types.js";
+import { isCredentialHeaderName, isLocalHostname, looksLikePlaceholder, redactSecret } from "../util.js";
+import type { ConfigFile, ParsedServer, RawFinding, RuleContext, Severity } from "../types.js";
 
 /** Pattern, human label, default severity, match against the *value*. */
 const KNOWN_SECRET_VALUES: Array<[RegExp, string, Severity]> = [
@@ -25,37 +25,117 @@ const KNOWN_SECRET_VALUES: Array<[RegExp, string, Severity]> = [
 const GENERIC_SECRET_KEY =
   /(secret|token|password|passwd|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth[-_]?token|bearer)/i;
 
+const EMBEDDED_SECRET_VALUES: Array<[RegExp, string, Severity]> = [
+  [/AKIA[0-9A-Z]{16}/, "AWS access key id", "high"],
+  [/sk-ant-[A-Za-z0-9_-]{8,}/, "Anthropic API key", "high"],
+  [/sk-or-v1-[A-Za-z0-9_-]{8,}/, "OpenRouter API key", "high"],
+  [/[sr]k_(live|test)_[A-Za-z0-9]{16,}/, "Stripe secret key", "high"],
+  [/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}/, "GitHub token", "high"],
+  [/github_pat_[A-Za-z0-9_]{22,}/, "GitHub token", "high"],
+  [/npm_[A-Za-z0-9]{36}/, "npm publish token", "high"],
+  [/xox[baprs]-[A-Za-z0-9-]+/, "Slack token", "high"],
+  [/xapp-[A-Za-z0-9-]+/, "Slack token", "high"],
+  [/glpat-[A-Za-z0-9_-]{20,}/, "GitLab personal access token", "high"],
+  [/AIza[0-9A-Za-z_-]{35}/, "Google API key", "high"],
+  [/lin_api_[A-Za-z0-9]{20,}/, "Linear API key", "high"],
+  [/sbp_[a-f0-9]{32,}/, "Supabase service key", "high"],
+  [/dop_v1_[a-f0-9]{64}/, "DigitalOcean token", "high"],
+  [/-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----/, "private key material", "critical"],
+];
+
 const MAX_SECRET_FINDINGS_PER_SERVER = 5;
+
+export interface KnownSecret {
+  label: string;
+  severity: Severity;
+  secret: string;
+}
+
+/** Match a known credential shape, including one embedded in a longer argument. */
+export function matchKnownSecret(value: string): KnownSecret | null {
+  for (const [pattern, label, severity] of KNOWN_SECRET_VALUES) {
+    if (pattern.test(value)) return { label, severity, secret: value };
+  }
+  for (const [pattern, label, severity] of EMBEDDED_SECRET_VALUES) {
+    const match = pattern.exec(value);
+    if (match?.[0]) return { label, severity, secret: match[0] };
+  }
+  return null;
+}
+
+export function hasKnownSecret(value: string): boolean {
+  if (matchKnownSecret(value) !== null) return true;
+  const bearer = /^Bearer\s+(\S+)\s*$/i.exec(value.trim());
+  return bearer?.[1] !== undefined && bearer[1] !== value && matchKnownSecret(bearer[1]) !== null;
+}
 
 /** True when a key/value pair looks like a stored credential (used for JSON redaction). */
 export function mayContainSecret(key: string, value: string): boolean {
-  if (KNOWN_SECRET_VALUES.some(([pattern]) => pattern.test(value))) return true;
+  if (hasKnownSecret(value)) return true;
   return GENERIC_SECRET_KEY.test(key) && value.length >= 16 && !looksLikePlaceholder(value);
 }
 
-function checkSecretValue(where: string, key: string, value: string): RawFinding | null {
-  for (const [pattern, label, severity] of KNOWN_SECRET_VALUES) {
-    if (pattern.test(value)) {
-      return {
-        title: `${label} stored in plaintext`,
-        detail: `${where} \`${key}\` holds a value matching the shape of a ${label}. Anyone who can read this config file (backups, dotfile repos, malware) gets the credential.`,
-        evidence: `${where}.${key} = ${redactSecret(value)}`,
-        severity,
-        remediation: "Move the credential to a secret manager or system keychain and reference it indirectly; rotate the exposed value.",
-      };
+/** Replace known credential shapes in free text. Global regexes are not reused. */
+export function redactKnownSecrets(text: string): string {
+  let out = text;
+  for (const [pattern] of EMBEDDED_SECRET_VALUES) {
+    out = out.replace(new RegExp(pattern.source, "g"), (match) => redactSecret(match));
+  }
+  return out;
+}
+
+/** Redact one command argument for machine-readable output. */
+export function redactCommandArg(arg: string): string {
+  const eq = /^(--?[A-Za-z0-9_.-]+)=(.*)$/.exec(arg);
+  if (eq?.[1] !== undefined && eq[2] !== undefined) {
+    const key = eq[1].replace(/^-+/, "");
+    if (mayContainSecret(key, eq[2])) {
+      return `${eq[1]}=${hasKnownSecret(eq[2]) ? redactKnownSecrets(eq[2]) : redactSecret(eq[2])}`;
     }
   }
-  if (
-    GENERIC_SECRET_KEY.test(key) &&
-    value.length >= 16 &&
-    !looksLikePlaceholder(value)
-  ) {
+  return redactKnownSecrets(arg);
+}
+
+function describeSecret(where: string, key: string, known: KnownSecret): RawFinding {
+  const viaArg = where === "args";
+  if (viaArg) {
     return {
-      title: "Possible credential stored in plaintext",
-      detail: `${where} \`${key}\` looks like a sensitive key holding a ${value.length}-character value.`,
-      evidence: `${where}.${key} = ${redactSecret(value)}`,
+      title: `${known.label} passed as a command argument`,
+      detail: `An argument holds a value matching the shape of a ${known.label}. Command-line credentials leak into the plaintext config and may surface in process listings while the server runs.`,
+      evidence: redactSecret(known.secret),
+      severity: known.severity,
+      remediation: "Pass the credential via a secret-manager-backed env reference instead of a literal argument; rotate the exposed value.",
+    };
+  }
+  return {
+    title: `${known.label} stored in plaintext`,
+    detail: `${where} \`${key}\` holds a value matching the shape of a ${known.label}. Anyone who can read this config file (backups, dotfile repos, malware) gets the credential.`,
+    evidence: `${where}.${key} = ${redactSecret(known.secret)}`,
+    severity: known.severity,
+    remediation: "Move the credential to a secret manager or system keychain and reference it indirectly; rotate the exposed value.",
+  };
+}
+
+function checkSecretValue(where: string, key: string, value: string): RawFinding | null {
+  const pieces = [value];
+  const bearer = /^Bearer\s+(\S+)\s*$/i.exec(value.trim());
+  if (bearer?.[1] !== undefined) pieces.push(bearer[1]);
+  for (const piece of pieces) {
+    const known = matchKnownSecret(piece);
+    if (known) return describeSecret(where, key, known);
+  }
+  if (GENERIC_SECRET_KEY.test(key) && value.length >= 16 && !looksLikePlaceholder(value)) {
+    const viaArg = where === "args";
+    return {
+      title: viaArg ? "Possible credential passed as a command argument" : "Possible credential stored in plaintext",
+      detail: viaArg
+        ? `Argument \`${key}\` looks like a sensitive flag holding a ${value.length}-character value.`
+        : `${where} \`${key}\` looks like a sensitive key holding a ${value.length}-character value.`,
+      evidence: viaArg ? `${key}=${redactSecret(value)}` : `${where}.${key} = ${redactSecret(value)}`,
       severity: "medium",
-      remediation: "Confirm the value is not a live credential; prefer a keychain or secret manager reference.",
+      remediation: viaArg
+        ? "Pass the credential via a secret-manager-backed env reference instead of a literal argument."
+        : "Confirm the value is not a live credential; prefer a keychain or secret manager reference.",
     };
   }
   return null;
@@ -78,18 +158,22 @@ function secretsRule(server: ParsedServer): RawFinding[] {
     }
   }
   // Credentials passed as CLI args or embedded in the URL are just as exposed
-  // as env vars — they sit in the same plaintext file.
-  for (const arg of server.args ?? []) {
-    for (const [pattern, label, severity] of KNOWN_SECRET_VALUES) {
-      if (pattern.test(arg)) {
-        if (push({
-          title: `${label} passed as a command argument`,
-          detail: `An argument holds a value matching the shape of a ${label}. Command-line credentials leak into the plaintext config and may surface in process listings while the server runs.`,
-          evidence: redactSecret(arg),
-          severity,
-          remediation: "Pass the credential via a secret-manager-backed env reference instead of a literal argument; rotate the exposed value.",
-        })) return findings;
-      }
+  // as env vars — they sit in the same plaintext file. Flags (`--token=…` and
+  // `--token …`) are checked, not only arguments that are the secret alone.
+  const args = server.args ?? [];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]!;
+    const eq = /^(--?[A-Za-z0-9_.-]+)=(.*)$/.exec(arg);
+    if (eq?.[1] !== undefined && eq[2] !== undefined) {
+      if (push(checkSecretValue("args", eq[1].replace(/^-+/, ""), eq[2]))) return findings;
+      continue;
+    }
+    if (push(checkSecretValue("args", "arg", arg))) return findings;
+    const flag = /^--([A-Za-z0-9_.-]+)$/.exec(arg);
+    const next = args[i + 1];
+    if (flag?.[1] !== undefined && next !== undefined && !next.startsWith("-") && GENERIC_SECRET_KEY.test(flag[1])) {
+      if (push(checkSecretValue("args", flag[1], next))) return findings;
+      i += 1;
     }
   }
   if (server.url !== undefined) {
@@ -265,6 +349,9 @@ function packageToken(server: ParsedServer): { pkg: string; autoInstall: boolean
   if (runnerKind === undefined) return null;
   const args = server.args ?? [];
 
+  // `uv run` executes a local project. Registry installs are `uvx` and `uv tool …`.
+  if ((base === "uv" || base === "uv.exe") && !args.includes("tool")) return null;
+
   // npm/pnpm/uv need an exec-style subcommand to act as a package runner.
   if (base === "npm" || base === "npm.exe" || base === "pnpm" || base === "pnpm.exe" || base === "uv" || base === "uv.exe") {
     if (!args.some((a) => RUNNER_SUBCOMMANDS.has(a))) return null;
@@ -374,20 +461,75 @@ const OFFICIAL_PACKAGES = [
 ];
 const OFFICIAL_BASENAMES = new Map(OFFICIAL_PACKAGES.map((p) => [p.split("/").pop()!, p]));
 
+/** Distance we care about is 0 or 1; anything larger collapses to 2. Includes one adjacent transposition. */
+function editDistanceAtMostOne(a: string, b: string): number {
+  if (a === b) return 0;
+  const aLen = a.length;
+  const bLen = b.length;
+  if (Math.abs(aLen - bLen) > 1) return 2;
+  const rows = Array.from({ length: aLen + 1 }, () => new Array<number>(bLen + 1).fill(0));
+  for (let i = 0; i <= aLen; i += 1) rows[i]![0] = i;
+  for (let j = 0; j <= bLen; j += 1) rows[0]![j] = j;
+  for (let i = 1; i <= aLen; i += 1) {
+    let rowMin = rows[i]![0]!;
+    for (let j = 1; j <= bLen; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let value = Math.min(rows[i - 1]![j]! + 1, rows[i]![j - 1]! + 1, rows[i - 1]![j - 1]! + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        value = Math.min(value, rows[i - 2]![j - 2]! + 1);
+      }
+      rows[i]![j] = value;
+      if (value < rowMin) rowMin = value;
+    }
+    if (rowMin > 1) return 2;
+  }
+  return rows[aLen]![bLen]!;
+}
+
 function typosquatRule(server: ParsedServer): RawFinding[] {
   const info = packageToken(server);
   if (info === null) return [];
   const name = packageName(info.pkg);
-  const basename = name.split("/").pop() ?? name;
+  if (/[^\x00-\x7F]/.test(name)) {
+    return [
+      {
+        title: "Package name contains non-ASCII characters",
+        detail: `\`${info.pkg}\` uses non-ASCII characters. Package names that impersonate an official server often swap in lookalike letters (Cyrillic а, Greek ο) that render like ASCII.`,
+        evidence: `${info.runnerCommand} ${JSON.stringify(info.pkg)}`,
+        severity: "medium",
+        remediation: "Install the official ASCII package name, or verify this publisher deliberately before running it.",
+      },
+    ];
+  }
+  const basename = (name.split("/").pop() ?? name).toLowerCase();
   const official = OFFICIAL_BASENAMES.get(basename);
-  if (official === undefined || name === official) return [];
+  if (official !== undefined) {
+    if (name.toLowerCase() === official.toLowerCase()) return [];
+    return [
+      {
+        title: "Package name impersonates an official MCP server",
+        detail: `\`${info.pkg}\` reuses the name of the official server \`${official}\` under a different scope (or none). This is the classic typosquat shape: same tool name, different publisher — your agent will happily run it.`,
+        evidence: `${info.runnerCommand} ${info.pkg}`,
+        severity: "medium",
+        remediation: `If you meant the official server, use \`${official}\`; otherwise verify \`${name}\`'s publisher deliberately.`,
+      },
+    ];
+  }
+  let nearest: string | undefined;
+  for (const [base, pkg] of OFFICIAL_BASENAMES) {
+    if (editDistanceAtMostOne(basename, base) === 1) {
+      nearest = pkg;
+      break;
+    }
+  }
+  if (nearest === undefined) return [];
   return [
     {
-      title: "Package name impersonates an official MCP server",
-      detail: `\`${info.pkg}\` reuses the name of the official server \`${official}\` under a different scope (or none). This is the classic typosquat shape: same tool name, different publisher — your agent will happily run it.`,
+      title: "Package name is one edit from an official MCP server",
+      detail: `\`${info.pkg}\` is a one-character misspelling of the official server \`${nearest}\`. Typosquats of MCP server names are a common way to get an agent to run someone else's code.`,
       evidence: `${info.runnerCommand} ${info.pkg}`,
       severity: "medium",
-      remediation: `If you meant the official server, use \`${official}\`; otherwise verify \`${name}\`'s publisher deliberately.`,
+      remediation: `If you meant the official server, use \`${nearest}\`; otherwise verify \`${name}\`'s publisher deliberately.`,
     },
   ];
 }
@@ -472,17 +614,8 @@ function unverifiedPublisherRule(server: ParsedServer): RawFinding[] {
   ];
 }
 
-function isLocalHost(url: URL): boolean {
-  return (
-    url.hostname === "localhost" ||
-    url.hostname === "127.0.0.1" ||
-    url.hostname === "0.0.0.0" ||
-    url.hostname === "::1" ||
-    url.hostname === "[::1]" ||
-    url.hostname === "[::]" ||
-    url.hostname.endsWith(".local") ||
-    url.hostname.endsWith(".localhost")
-  );
+function isLocalUrl(url: URL): boolean {
+  return isLocalHostname(url.hostname);
 }
 
 function insecureTransportRule(server: ParsedServer): RawFinding[] {
@@ -501,12 +634,12 @@ function insecureTransportRule(server: ParsedServer): RawFinding[] {
       },
     ];
   }
-  if (url.protocol === "http:") {
-    if (isLocalHost(url)) {
+  if (url.protocol === "http:" || url.protocol === "ws:") {
+    if (isLocalUrl(url)) {
       return [
         {
           title: "Remote server over unencrypted local transport",
-          detail: `${url} uses plain HTTP. Traffic is not encrypted on the wire, and any local process can impersonate the server.`,
+          detail: `${url} uses an unencrypted ${url.protocol === "ws:" ? "WebSocket" : "HTTP"} transport. Traffic is not encrypted on the wire, and any local process can impersonate the server.`,
           evidence: server.url,
           severity: "low",
           remediation: "Prefer HTTPS unless this is a throwaway local server.",
@@ -515,7 +648,7 @@ function insecureTransportRule(server: ParsedServer): RawFinding[] {
     }
     return [
       {
-        title: "Remote server over plain HTTP",
+        title: url.protocol === "ws:" ? "Remote server over plain WebSocket" : "Remote server over plain HTTP",
         detail: `${url} sends every message — including your prompts, files and any tool results — unencrypted across the network. Interception or tampering (tool-list swapping) is trivial on-path.`,
         evidence: server.url,
         severity: "high",
@@ -526,15 +659,13 @@ function insecureTransportRule(server: ParsedServer): RawFinding[] {
   return [];
 }
 
-const CREDENTIAL_HEADER = /(authorization|auth|api[-_]?key|apikey|token|secret|password)/i;
-
 function remoteCredentialsRule(server: ParsedServer): RawFinding[] {
   if (server.headers === undefined) return [];
   const findings: RawFinding[] = [];
   for (const [name, value] of Object.entries(server.headers)) {
-    if (!CREDENTIAL_HEADER.test(name) || value.length < 8) continue;
+    if (!isCredentialHeaderName(name) || value.length < 8) continue;
     if (looksLikePlaceholder(value)) continue;
-    if (KNOWN_SECRET_VALUES.some(([p]) => p.test(value))) continue; // already flagged by secrets rule
+    if (hasKnownSecret(value)) continue; // already flagged by the secrets rule, including Bearer-wrapped tokens
     findings.push({
       title: "Remote credentials stored in config",
       detail: `Header \`${name}\` carries a credential for ${server.url ?? "the remote server"}. The value sits in a plaintext JSON file.`,
@@ -648,7 +779,11 @@ function configDriftRule(server: ParsedServer, context: RuleContext): RawFinding
   return findings;
 }
 
-export const staticRules: Array<{ meta: import("../types.js").RuleMeta; run: import("../types.js").RuleFn }> = [
+export const staticRules: Array<{
+  meta: import("../types.js").RuleMeta;
+  run: import("../types.js").RuleFn;
+  runConfig?: (config: ConfigFile) => RawFinding[];
+}> = [
   {
     meta: {
       id: "MCP001",
@@ -710,8 +845,8 @@ export const staticRules: Array<{ meta: import("../types.js").RuleMeta; run: imp
       name: "insecure-transport",
       severity: "high",
       scope: "static",
-      description: "Detects remote MCP servers served over plain HTTP.",
-      remediation: "Use HTTPS endpoints.",
+      description: "Detects remote MCP servers served over plain HTTP or ws://.",
+      remediation: "Use HTTPS or wss:// endpoints.",
     },
     run: insecureTransportRule,
   },
@@ -765,7 +900,7 @@ export const staticRules: Array<{ meta: import("../types.js").RuleMeta; run: imp
       name: "typosquat-lookalike-package",
       severity: "medium",
       scope: "static",
-      description: "Detects packages reusing an official MCP server's name under a different scope or no scope.",
+      description: "Detects packages reusing an official MCP server's name, a one-character misspelling, or non-ASCII lookalikes.",
       remediation: "Verify the publisher; prefer the official package name.",
     },
     run: typosquatRule,
@@ -791,5 +926,28 @@ export const staticRules: Array<{ meta: import("../types.js").RuleMeta; run: imp
       remediation: "Remove auto-approve entries or restrict them to read-only tools.",
     },
     run: autoApproveRule,
+  },
+  {
+    meta: {
+      id: "MCP017",
+      name: "config-parse-error",
+      severity: "high",
+      scope: "static",
+      description: "Reports config files that exist but could not be read or parsed, so their servers were not audited.",
+      remediation: "Fix the file syntax and permissions, then re-run the scan. Until it parses, servers in that file are invisible.",
+    },
+    run: () => [],
+    runConfig(config) {
+      if (!config.exists || config.error === undefined) return [];
+      return [
+        {
+          title: "Config file could not be parsed",
+          detail: `${config.path} (${config.client}) was not fully audited: ${config.error}. Servers in an unreadable config are invisible to every other rule.`,
+          evidence: config.error,
+          severity: "high" as const,
+          remediation: "Fix the syntax or permissions and scan again. A broken config must not pass as a clean audit.",
+        },
+      ];
+    },
   },
 ];
