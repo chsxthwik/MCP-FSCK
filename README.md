@@ -28,6 +28,7 @@ mcp-fsck                    # scan every discovered config (static analysis only
 mcp-fsck --deep             # also handshake with each server, audit live tool metadata
 mcp-fsck scan ./mcp.json    # scan specific files (JSONC or Codex config.toml)
 mcp-fsck list               # show discovered configs and the servers they define
+mcp-fsck list ./mcp.json    # same, for the files you pass (secrets redacted)
 mcp-fsck rules              # print the rule table
 ```
 
@@ -46,7 +47,7 @@ line counts findings by severity. Clean scans exit `0`; findings at or above
 | `--fail-on <sev>` | exit `1` when findings ≥ severity (default `high`; `none` to disable) |
 | `--timeout <ms>` | per-server deep-mode timeout (default `10000`) |
 
-Exit `0` when nothing reaches the gate. Exit `1` when a finding does. Exit `2` when the scan itself cannot run (missing path, bad `--fail-on`, unreadable baseline). Servers inside a file are listed worst grade first. The first line is the overall grade.
+Exit `0` when nothing reaches the gate. Exit `1` when a finding does. Exit `2` when the scan itself cannot run (missing path, bad `--fail-on`, unreadable baseline). Servers inside a file are listed worst grade first. The first line is the overall grade. When a baseline suppresses findings, that line names the file. `--write-baseline` prints the report of what it recorded, then exits `0`.
 
 ### In CI
 
@@ -85,7 +86,7 @@ Every later scan suppresses those findings (and reports `N suppressed`), so
 
 | Rule | Severity | Detects |
 |---|---|---|
-| `MCP001` secrets-in-config | high | API keys, tokens and private key material in plaintext configs — including `Bearer` values, `--token=…` flags, and credentials embedded in URLs |
+| `MCP001` secrets-in-config | high | API keys, tokens and private key material in plaintext configs — including `Bearer` values, `--token=…` flags, URL userinfo, and query strings |
 | `MCP002` shell-metachar-execution | critical/medium | `sh -c`/`cmd /c`/`npx -c` command strings, pipes-to-shell, command substitution, runtime base64 decoding |
 | `MCP003` inline-code-execution | medium | interpreters invoked with `-e`/`-c` instead of reviewed files |
 | `MCP004` auto-install-unpinned-package | medium | `npx -y`, `bunx`, `pnpm dlx`, `npm exec`, `uvx` re-resolving code at every startup — including `@latest`/range tags that look pinned but aren't (the *MCP rug pull*) |
@@ -99,6 +100,7 @@ Every later scan suppresses those findings (and reports `N suppressed`), so
 | `MCP015` suspicious-server-name | medium | invisible/non-ASCII characters disguising one server as another |
 | `MCP016` tools-auto-approved | medium/high | `alwaysAllow`/`autoApprove` lists skipping consent prompts (`*` = high) |
 | `MCP017` config-parse-error | high | a config file that exists but could not be read or parsed, so its servers were not audited |
+| `MCP018` deep-handshake-failed | info | `--deep` could not finish `tools/list` (timeout, early exit, or a transport it does not speak). Static checks still ran. This does not fail the default high gate |
 
 Entries marked `enabled = false` / `disabled = true` are skipped entirely.
 A file that fails to parse does **not** count as a clean scan: `MCP017` fails the default `--fail-on high` gate.
@@ -145,6 +147,8 @@ Example output:
 | JetBrains Junie | `~/.junie/mcp/mcp.json` |
 | Amazon Q Developer | `~/.aws/amazonq/mcp.json`, project `.amazonq/mcp.json` |
 
+Project files are also read from parent directories, stopping at the git root. A scan started in `packages/app` still sees the repo's `.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.gemini/settings.json`, `.codex/config.toml`, `.amazonq/mcp.json` and `.zed/settings.json`. It does not keep walking above the work tree.
+
 Configs are parsed tolerantly — JSONC comments/trailing commas, non-string
 args and env values, and TOML for Codex — so real-world files never silently
 scan as empty.
@@ -161,7 +165,10 @@ Stdio servers may answer with newline-delimited JSON or legacy
 streamable-HTTP handshake (session id included). `sse` servers are read from
 the endpoint event. Credential headers and URL userinfo are **not** sent to
 non-local plain HTTP; that shows up as a warning, and the static rules still
-flag the config. WebSocket servers are not enumerated.
+flag the config. WebSocket servers are not enumerated. A handshake that times
+out or exits early is `MCP018` (info) on that server — the report does not
+draw a green check for a tool list it never saw. That finding does not fail
+the default `--fail-on high` gate.
 
 It does *start the server processes* — which for `npx`-style entries may
 download packages. Only use `--deep` on configs you control, and treat it like
