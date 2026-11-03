@@ -4,7 +4,7 @@
 <a href="https://github.com/chsxthwik/MCP-FSCK/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/chsxthwik/MCP-FSCK/actions/workflows/ci.yml/badge.svg"></a>
 <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/github/license/chsxthwik/MCP-FSCK"></a>
 <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-3178c6">
-<img alt="Node 18+" src="https://img.shields.io/badge/node-%E2%89%A518-339933">
+<img alt="Node 20+" src="https://img.shields.io/badge/node-%E2%89%A520-339933">
 <a href="https://github.com/chsxthwik/MCP-FSCK/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/chsxthwik/MCP-FSCK"></a>
 </p>
 

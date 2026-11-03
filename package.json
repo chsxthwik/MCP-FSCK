@@ -22,7 +22,7 @@
     "ai-agents"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "bin": {
     "mcp-fsck": "dist/cli.js"
