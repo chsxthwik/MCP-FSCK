@@ -160,7 +160,11 @@ describe("mcp-fsck CLI (end-to-end against dist/cli.js)", () => {
   });
 
   it.skipIf(!distExists)("passes the clean example and fails the risky example", () => {
-    const clean = run(["scan", join(ROOT, "examples", "clean.mcp.json"), "--fail-on", "high"]);
+    // Copy to a fresh dir with mode 0644 so mounts that report 0777 (WSL/DrvFs) don't trip MCP009.
+    const dir = mkdtempSync(join(tmpdir(), "mcp-fsck-clean-"));
+    const cleanPath = join(dir, "clean.mcp.json");
+    writeFileSync(cleanPath, readFileSync(join(ROOT, "examples", "clean.mcp.json")), { mode: 0o644 });
+    const clean = run(["scan", cleanPath, "--fail-on", "high"]);
     expect(clean.status, clean.stdout).toBe(0);
     expect(clean.stdout).toContain("overall grade");
     expect(clean.stdout).toContain("grade A");
