@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="220" viewBox="0 0 900 220" role="img" aria-label="mcp-fsck: integrity check for MCP server configs">
+  <rect width="900" height="220" rx="14" fill="#0d1117"/>
+  <rect x="1" y="1" width="898" height="218" rx="13" fill="none" stroke="#30363d"/>
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+    <text x="48" y="92" font-size="52" font-weight="700" fill="#e6edf3">mcp-fsck</text>
+    <text x="48" y="130" font-size="20" fill="#8b949e">integrity check for MCP server configs</text>
+    <text x="48" y="176" font-size="14" fill="#8b949e">$ mcp-fsck scan --fail-on high</text>
+  </g>
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="16" font-weight="700" text-anchor="middle">
+    <rect x="560" y="50" width="52" height="52" rx="8" fill="#238636"/><text x="586" y="85" fill="#fff" font-size="28">A</text>
+    <rect x="624" y="50" width="52" height="52" rx="8" fill="#2f81f7"/><text x="650" y="85" fill="#fff" font-size="28">B</text>
+    <rect x="688" y="50" width="52" height="52" rx="8" fill="#d29922"/><text x="714" y="85" fill="#0d1117" font-size="28">C</text>
+    <rect x="752" y="50" width="52" height="52" rx="8" fill="#db6d28"/><text x="778" y="85" fill="#fff" font-size="28">D</text>
+    <rect x="816" y="50" width="52" height="52" rx="8" fill="#da3633"/><text x="842" y="85" fill="#fff" font-size="28">F</text>
+    <text x="714" y="140" fill="#8b949e" font-size="14" font-weight="400">every server gets a grade</text>
+  </g>
+</svg>

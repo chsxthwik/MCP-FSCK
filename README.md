@@ -1,9 +1,12 @@
-# mcp-fsck
+<p align="center"><img src="docs/banner.svg" alt="mcp-fsck: integrity check for MCP server configs" width="800"></p>
 
-Integrity check for MCP server configs.
-
-[![CI](https://github.com/chsxthwik/MCP-FSCK/actions/workflows/ci.yml/badge.svg)](https://github.com/chsxthwik/MCP-FSCK/actions/workflows/ci.yml)
-[MIT](LICENSE)
+<p align="center">
+<a href="https://github.com/chsxthwik/MCP-FSCK/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/chsxthwik/MCP-FSCK/actions/workflows/ci.yml/badge.svg"></a>
+<a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/github/license/chsxthwik/MCP-FSCK"></a>
+<img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-3178c6">
+<img alt="Node 18+" src="https://img.shields.io/badge/node-%E2%89%A518-339933">
+<a href="https://github.com/chsxthwik/MCP-FSCK/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/chsxthwik/MCP-FSCK"></a>
+</p>
 
 An MCP server is a program an AI coding agent is allowed to start. It can read files, run commands, and hold API keys. The config that lists those servers is easy to get wrong, and a bad entry runs with your permissions.
 
@@ -329,7 +332,7 @@ npm test
 npm run typecheck
 ```
 
-`npm test` builds `dist/` and then runs the unit tests and the real command. This checkout: 7 files, 127 tests, all passed. `npm run typecheck` (`tsc --noEmit`) exited 0.
+`npm test` builds `dist/` and then runs the unit tests and the real command. This checkout: 8 files, 139 tests, all passed. `npm run typecheck` (`tsc --noEmit`) exited 0.
 
 The deep tests drive `test/fixtures/fake-mcp-server.mjs` and `test/fixtures/framed-mcp-server.mjs` through a real JSON-RPC handshake.
 
