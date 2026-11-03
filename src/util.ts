@@ -46,9 +46,7 @@ export function stripJsonComments(text: string): string {
 }
 
 export function stripTrailingCommas(text: string): string {
-  // remove a comma directly followed by } or ] (outside strings — input is
-  // already comment-free and strings contain no bare } risk is acceptable;
-  // we still track strings to avoid mangling string content like "a,}")
+  // Drop a comma directly followed by } or ], tracking strings so values like "a,}" survive.
   let out = "";
   let inString = false;
   for (let i = 0; i < text.length; i += 1) {

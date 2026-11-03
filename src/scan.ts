@@ -16,7 +16,6 @@ function ruleWarning(ruleId: string, where: string, err: unknown): string {
 export async function scan(options: ScanOptions, configs: ConfigFile[]): Promise<ScanResult> {
   const allServers = configs.flatMap((c) => c.servers);
 
-  // ---- deep mode: live tool enumeration -------------------------------
   const deep = new Map<string, DeepResult>();
   if (options.deep) {
     const targets = allServers.filter((s) => s.transport === "stdio" || s.transport === "http" || s.transport === "sse");
@@ -27,7 +26,6 @@ export async function scan(options: ScanOptions, configs: ConfigFile[]): Promise
     }
   }
 
-  // ---- rules ----------------------------------------------------------
   const context: RuleContext = { allServers, deep };
   const findings: Finding[] = [];
   const warnings: string[] = [];
@@ -97,7 +95,6 @@ export async function scan(options: ScanOptions, configs: ConfigFile[]): Promise
     return a.ruleId.localeCompare(b.ruleId);
   });
 
-  // ---- baseline suppressions ----------------------------------------
   const { kept, suppressed } = applyBaseline(findings, options.baseline ?? []);
 
   const score = riskScore(kept);

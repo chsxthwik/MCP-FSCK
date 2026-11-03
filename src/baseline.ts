@@ -93,7 +93,7 @@ function expandSource(source: string, cwd: string): string {
 }
 
 function sourceMatches(entrySource: string, findingSource: string, cwd: string): boolean {
-  // Substring match is the original contract (hand-written "mcp.json" entries).
+  // Substring match lets hand-written entries such as "mcp.json" work.
   if (findingSource.includes(entrySource)) return true;
   return resolve(findingSource) === expandSource(entrySource, cwd);
 }
